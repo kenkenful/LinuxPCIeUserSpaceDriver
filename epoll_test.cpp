@@ -5,6 +5,8 @@
 #include <fcntl.h>
 #include <thread>
 #include <unistd.h>
+#include <cstring>
+#include "common.h"
 
 
 #define ASSERT(expr, msg, ...)                                             \
@@ -18,17 +20,7 @@
     } while (0)
 
 
-// ioctls
-#define TEST 'T'
-#define IOCTL_SIGNAL_TEST   _IOW(TEST, 1, struct test_params*)
-#define IOCTL_SET_SIGNAL_FD _IOW(TEST, 2, struct test_params*)
-#define IOCTL_MAP_USERPAGE  _IOW(TEST, 3, struct test_params*)
 
-struct test_params{
-    int vector;
-    int fd;
-
-};
 
 void func(int *efd) {
     struct epoll_event evs;
@@ -41,7 +33,7 @@ void func(int *efd) {
 int main(){
 
 
-    int fd = open("/dev/test0", O_RDWR|O_SYNC);
+    int fd = open("/dev/nvmet0", O_RDWR|O_SYNC);
     if(fd < 0){
         printf("open error\n");
         return 1;
@@ -63,16 +55,22 @@ int main(){
     int ret = epoll_ctl(epfd, EPOLL_CTL_ADD, efd, &ev);
     ASSERT(ret == 0, "cannot add fd to epoll");
 
-    std::thread th(func, &epfd);
+    //std::thread th(func, &epfd);
 
     sleep(3);
 
     struct test_params params;
-    params.fd = efd;
+    params.s.fd = efd;
+    params.s.msix = true;
 
-    int rc = ioctl(fd, IOCTL_SIGNAL_TEST  , &params);
+    strcpy(params.s.name, "testint"); 
 
-    th.join();
+    params.s.vector = 0;
+
+
+     ioctl(fd, IOCTL_SET_SIGNAL  , &params);
+
+    //th.join();
 
     
 }
