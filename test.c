@@ -363,6 +363,9 @@ static blk_status_t queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_que
     unsigned int nr_bytes = 0;
     blk_status_t status = BLK_STS_OK;
     struct request *rq = bd->rq;
+
+        tprintk("%s, %d\n", __func__ , __LINE__);
+
     blk_mq_start_request(rq);
 
     if (blk_update_request(rq, status, nr_bytes)) {
@@ -464,7 +467,7 @@ static int nvmet_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     pnvme_dev->tag_set.cmd_size = 0;
     pnvme_dev->tag_set.ops = &mq_ops;
     pnvme_dev->tag_set.driver_data =  pnvme_dev;
-    pnvme_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
+    //pnvme_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
     pnvme_dev->tag_set.nr_hw_queues = 1;
     pnvme_dev->tag_set.queue_depth = 128;
     pnvme_dev->tag_set.numa_node = NUMA_NO_NODE;
@@ -506,7 +509,7 @@ static int nvmet_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	}
 
     pnvme_dev->queue = pnvme_dev->gendisk->queue; 
-
+    pnvme_dev->queue->queuedata = pnvme_dev;
 
     //pnvme_dev ->queue = gendisk->queue;
 
