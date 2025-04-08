@@ -5,10 +5,11 @@
 #include <linux/version.h>
 #include <linux/dma-mapping.h>
 
-
-
+//#include <linux/device.h>
+#include <linux/blk_types.h>
 #include <linux/blkdev.h>
-#include <linux/blk-mq.h>   
+
+#include <linux/part_stat.h>
 #include "common.h"
 
 MODULE_LICENSE("GPL v2");
@@ -16,6 +17,9 @@ MODULE_DESCRIPTION("Simple NVMe Device Driver");
 
 #define DEVICE_NAME "nvmet"
 #define NVME_MINORS		(1U << MINORBITS)
+
+#undef USE_DUMMYBLK_LIST  /* This define is not complete, and already not mentenance. */
+#define NUM_OF_DUMMY_FOR_EACH    (128)
 
 static unsigned int vectors = 16;
 module_param(vectors, uint, 0644);
@@ -33,13 +37,6 @@ static int blk_major;
 #define PCI_VENDOR_ID_TEST 0x144d
 #define PCI_DEVICE_ID_TEST 0xa808
 
-#define TEST_PCI_DRIVER_DEBUG
-#ifdef  TEST_PCI_DRIVER_DEBUG
-#define tprintk(fmt, ...) printk(KERN_ALERT "** (%3d) %-20s: " fmt, __LINE__,  __func__,  ## __VA_ARGS__)
-#else
-#define tprintk(fmt, ...) 
-#endif
-
 
 struct dma_entry {
     struct list_head list;
@@ -56,32 +53,39 @@ struct signal_entry{
 };
 
 
-//struct block_dev {
-    //sector_t capacity;
-    //u8 *data;  
-//    struct blk_mq_tag_set tag_set;
-//    struct request_queue *queue;
-//    struct gendisk *gendisk;
-//};
+struct dummyblk_entry {
+
+#if defined(USE_DUMMYBLK_LIST)
+    struct list_head list;
+    int number;
+#endif
+    struct page ** pages;
+    long npages;
+
+    struct gendisk *gendisk;
+};
+
 
 struct nvme_dev{
     struct pci_dev *pdev;
     struct cdev cdev;
     dev_t  devt;
-    int instance;
-    bool is_open;
+    int    instance;
+    bool   is_open;
+
+    struct device *sysdev;
 
     struct list_head memlist;
     struct list_head signallist;
 
     struct eventfd_ctx   *trigger;   /* use when INT-X */
-    
-    struct blk_mq_tag_set tag_set;
-    struct request_queue *queue;
-    struct gendisk *gendisk;
 
-    spinlock_t lock;	
-   
+#if defined(USE_DUMMYBLK_LIST)
+    struct list_head dummyblklist;
+#else    
+    struct dummyblk_entry *dummyblk_entry_p;
+#endif
+
 };
 
 static const struct pci_device_id test_nvme_ids[] =
@@ -106,7 +110,7 @@ static int nvmet_pci_open(struct inode* inode, struct file* filp){
 
 */
 static int nvmet_pci_close(struct inode* inode, struct file* filp){
-    tprintk("%s\n", __func__);
+    pr_info("%s\n", __func__);
 
     struct nvme_dev *pnvme_dev = filp->private_data;
 
@@ -114,7 +118,7 @@ static int nvmet_pci_close(struct inode* inode, struct file* filp){
     struct dma_entry *dma_list_e = NULL;
     
     list_for_each_entry_safe(dma_list_h, dma_list_e, &pnvme_dev->memlist, list) {
-        tprintk("safe remove in close\n");
+        pr_info("safe remove in close\n");
 
         list_del(&dma_list_h->list);
 		dma_free_coherent (&pnvme_dev -> pdev->dev, dma_list_h->size, dma_list_h->virt_addr, dma_list_h->dma_addr);
@@ -133,6 +137,45 @@ static int nvmet_pci_close(struct inode* inode, struct file* filp){
         
     }
 
+#if defined(USE_DUMMYBLK_LIST)
+    struct dummyblk_entry *dummyblk_list_h;
+    struct dummyblk_entry *dummyblk_list_e = NULL;
+
+    list_for_each_entry_safe(dummyblk_list_h, dummyblk_list_e, &pnvme_dev->dummyblklist, list) {
+        pr_info("remove dummy block\n");
+        list_del(&dummyblk_list_h->list);
+        
+        del_gendisk(dummyblk_list_h->gendisk);
+        blk_put_queue(dummyblk_list_h->gendisk->queue);
+	    put_disk(dummyblk_list_h->gendisk);
+        
+        kfree(dummyblk_list_h);
+    }
+#else
+
+    for(int i=0; i< NUM_OF_DUMMY_FOR_EACH; ++i){
+        if(pnvme_dev -> dummyblk_entry_p[i].gendisk != NULL){
+            //pr_info("%s: safe remove dummyblk\n", __func__);
+            del_gendisk(pnvme_dev -> dummyblk_entry_p[i].gendisk);
+
+	        //blk_cleanup_queue(dev->disk->queue);
+            blk_put_queue(pnvme_dev -> dummyblk_entry_p[i].gendisk->queue);
+	        put_disk(pnvme_dev -> dummyblk_entry_p[i].gendisk);
+
+            /* This is test code.*/
+            //uint8_t *data = (uint8_t*) page_address(pnvme_dev->dummyblk_entry_p[i].pages[0]);
+            //pr_info("receivce data: %x\n", data[0]);
+            //pr_info("receivce data: %x\n", data[1]);
+            //pr_info("receivce data: %x\n", data[2]);
+
+            for(int j=0; j< pnvme_dev->dummyblk_entry_p[i].npages; ++j) put_page(pnvme_dev->dummyblk_entry_p[i].pages[j]);
+            kfree(pnvme_dev->dummyblk_entry_p[i].pages);
+
+            pnvme_dev -> dummyblk_entry_p[i].gendisk = NULL;
+        }
+    }
+    
+#endif
     pnvme_dev->is_open = 0;
     return 0;
 }
@@ -157,9 +200,9 @@ int mmap_dma(struct file *filp, struct vm_area_struct *vma)
 
     size = ((size + PAGE_SIZE -1) >> PAGE_SHIFT) << PAGE_SHIFT;
 
-    tprintk("length: %d\n", size);
+    pr_info("length: %d\n", size);
 
-    tprintk("vma->vm_pgoff: %d\n", vma->vm_pgoff);
+    pr_info("vma->vm_pgoff: %d\n", vma->vm_pgoff);
 
     virt_addr = dma_alloc_coherent(&pnvme_dev -> pdev->dev, size, &dma_addr, GFP_KERNEL);
 
@@ -172,7 +215,7 @@ int mmap_dma(struct file *filp, struct vm_area_struct *vma)
     head -> dma_addr = dma_addr;
     head -> virt_addr = virt_addr;
 
-    tprintk("%p, %lx\n", virt_addr, dma_addr);
+    pr_info("%p, %lx\n", virt_addr, dma_addr);
 
     list_add(&head->list, &pnvme_dev-> memlist);
 
@@ -222,6 +265,93 @@ static irqreturn_t intx_irq(int irq, void *arg)
 	return IRQ_NONE;
 }
 
+
+static const struct block_device_operations bops = {
+	.owner		= THIS_MODULE,
+};
+
+
+int dummyblk_add(int major, struct nvme_dev * pnvme_dev, int number, struct page **pages, long npages)
+{
+	struct dummyblk_entry *entry = NULL;
+	int ret = 0;
+	struct gendisk *gdisk;
+
+	entry = kzalloc(sizeof(struct dummyblk_entry), GFP_KERNEL);
+	if (!entry) {
+		 return PTR_ERR(entry);
+	}
+
+	gdisk = blk_alloc_disk(NUMA_NO_NODE);
+	if (!gdisk) {
+		pr_err("Failed to allocate disk\n");
+        kfree(entry);
+		 return PTR_ERR(gdisk);
+	}
+
+	entry->gendisk = gdisk;
+
+	gdisk->flags = GENHD_FL_NO_PART;
+	gdisk->major = major;
+	gdisk->first_minor = number;
+	gdisk->minors = 1;
+
+	gdisk->fops = &bops;
+
+	gdisk->private_data = entry;
+
+    snprintf(gdisk->disk_name, sizeof( gdisk->disk_name), "d%dummy%d", pnvme_dev->instance, number);
+
+	set_capacity(gdisk, 0);
+
+	ret = add_disk(gdisk);
+	//ret = device_add_disk(p->sysdev, gdisk, NULL);
+    
+    if (ret) {
+        //blk_cleanup_queue(gdisk->queue);
+        blk_put_queue(gdisk->queue);
+	    put_disk(gdisk);
+        
+        kfree(entry);
+        return ret;
+	}
+
+#if defined(USE_DUMMYBLK_LIST)
+
+    entry->number = number;
+    list_add(&entry->list, &pnvme_dev-> dummyblklist);
+#else
+    if( pnvme_dev -> dummyblk_entry_p[number].gendisk == NULL){
+        pnvme_dev -> dummyblk_entry_p[number].pages = pages;    
+        pnvme_dev -> dummyblk_entry_p[number].gendisk = gdisk;
+        pnvme_dev -> dummyblk_entry_p[number].npages = npages;    
+    }else {   // alreay set 
+        del_gendisk(gdisk);
+        blk_put_queue(gdisk->queue);
+	    put_disk(gdisk);
+        
+        kfree(entry);
+        return -ENOMEM;
+    }
+#endif
+
+    pr_info("add device '%s'\n", gdisk->disk_name);
+	return 0;
+}
+
+void dummyblk_remove(struct dummyblk_entry *dev)
+{
+	del_gendisk(dev->gendisk);
+
+	//blk_cleanup_queue(dev->disk->queue);
+    blk_put_queue(dev->gendisk->queue);
+	put_disk(dev->gendisk);
+
+	kfree(dev);
+
+	pr_info("simple block device was removed\n");
+}
+
 static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long ioctlparam){
     int ret = 0;
     struct nvme_dev *pnvme_dev = filp->private_data;
@@ -255,7 +385,7 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
 	        }    
             
             if(params.s.msix){
-                tprintk("set msix: %s\n",  name);
+                pr_info("set msix: %s\n",  name);
 
                 ret = request_irq(pci_irq_vector(pnvme_dev->pdev, params.s.vector), 
                                       msix_irq, 
@@ -294,18 +424,17 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
             head -> trigger = trigger;
 
             list_add(&head->list, &pnvme_dev-> signallist);
-            tprintk("ioctl done\n");
+            pr_info("ioctl done\n");
 
             break;
         
         case IOCTL_GET_MEMFINFO:
-
             ptr = list_entry(pnvme_dev->memlist.next, struct dma_entry, list);
 
-            tprintk("ioctl : %p\n", ptr ->virt_addr);
+            pr_info("ioctl : %p\n", ptr ->virt_addr);
 
            // uint64_t temp = (uint64_t)((uintptr_t)(ptr ->virt_addr));
-           // tprintk("ioctl cast: %lx\n", temp);
+           // pr_info("ioctl cast: %lx\n", temp);
 
             params.m.dma_addr = ptr ->dma_addr;
             params.m.kernel_virtaddr = ptr ->virt_addr;
@@ -334,20 +463,102 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
                 return -EFAULT;
             }
 
-            tprintk("recv : %lx\n", params.m.kernel_virtaddr);
-            tprintk("recv : %lx\n", params.m.dma_addr);
+            pr_info("recv : %lx\n", params.m.kernel_virtaddr);
+            pr_info("recv : %lx\n", params.m.dma_addr);
 
             struct dma_entry *dma_list_h;
             struct dma_entry *dma_list_e = NULL;
                 
             list_for_each_entry_safe(dma_list_h, dma_list_e, &pnvme_dev->memlist, list) {
                 if((uint64_t)dma_list_h->virt_addr == params.m.kernel_virtaddr && dma_list_h->dma_addr == params.m.dma_addr){
-                    tprintk("safe remove in ioctl\n");
+                    pr_info("safe remove in ioctl\n");
                     list_del(&dma_list_h->list);
 		            dma_free_coherent (&pnvme_dev -> pdev->dev, dma_list_h->size, dma_list_h->virt_addr, dma_list_h->dma_addr);
                     kfree(dma_list_h);
+                    break;
                 }
             }
+
+            break;
+        
+        case IOCTL_ALLOC_DUMMYBLK:
+            //pr_info("IOCTL_ALLOC_DUMMYBLK\n");
+
+            if(copy_from_user(&params, (void  __user*)ioctlparam, sizeof(struct test_params))){
+                return -EFAULT;
+            }
+
+            // get_user_page
+            unsigned long udata = (unsigned long)params.d.buf;
+            pr_info("udata: %x\n", udata);
+
+            long npages = 0;
+            unsigned long npages_req = ((udata + params.d.len - 1)>>PAGE_SHIFT) - (udata>>PAGE_SHIFT) + 1;
+
+            struct page **pages;
+
+            unsigned fp_offset = (udata & (~PAGE_MASK));
+
+            pr_info("first page offset: %d\n", fp_offset);
+
+            pr_info("request page size: %d\n", npages_req);
+
+            if ((pages =  (struct page**) kvcalloc(npages_req, sizeof(struct pages*), GFP_KERNEL)) == NULL){
+                pr_err("could not allocate memory for pages array\n");
+                return -ENOMEM;
+            }
+
+            // Pin pages
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,0)
+            mmap_read_lock(current->mm);
+#else
+            down_read(&current->mm->mmap_sem);
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0)
+            npages = get_user_pages(udata, npages_req, FOLL_WRITE , pages);
+#else 
+            npages = get_user_pages(udata, npages_req, FOLL_WRITE , pages, NULL);
+#endif
+
+            if (npages <= 0){
+                pr_err("unable to pin any pages in memory\n");
+                kfree(pages);
+                return -ENOMEM;
+            }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,0)
+            mmap_read_unlock(current->mm);
+#else
+            up_read(&current->mm->mmap_sem);
+#endif
+
+          //  uint8_t *data = (uint8_t*) pages;
+
+          //  pr_info("%d\n", *data);
+
+          //  for(int i=0; i<npages; ++i) put_page(pages[i]);
+
+          //  kfree(pages);
+
+            dummyblk_add(blk_major, pnvme_dev, params.d.number, pages, npages);
+
+            break;
+
+        case IOCTL_REGISTER_STATS:
+
+#if defined(USE_DUMMYBLK_LIST)
+            
+#else 
+            part_stat_lock();
+            //part_stat_inc(&pnvme_dev->dummyblklist[0], ios[0]);
+
+
+
+            part_stat_unlock();
+
+#endif
+
 
             break;
 
@@ -356,25 +567,6 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
     }
 
     return ret;
-}
-
-static blk_status_t queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd)
-{
-    unsigned int nr_bytes = 0;
-    blk_status_t status = BLK_STS_OK;
-    struct request *rq = bd->rq;
-
-        tprintk("%s, %d\n", __func__ , __LINE__);
-
-    blk_mq_start_request(rq);
-
-    if (blk_update_request(rq, status, nr_bytes)) {
-        BUG();
-    }
-
-    __blk_mq_end_request(rq, status);
-
-    return status;
 }
 
 
@@ -386,29 +578,7 @@ static const struct file_operations nvme_chr_fops = {
     .mmap           = mmap_dma,
 };
 
-static struct blk_mq_ops mq_ops = {
-    .queue_rq = queue_rq,
 
-};
-
-#if 0
-static void dummy_request(struct request_queue *q)
-{
-	struct request *req;
-	int ret = 0;
-
-	while ((req = blk_fetch_request(q)) != NULL) {
-		__blk_end_request_all(req, ret);
-	}
-}
-#endif
-
-static const struct block_device_operations blockdev_ops = {
-	.owner		= THIS_MODULE,
-   // .open       = blockdev_open,
-   // .release    = blockdev_release,
-   // .ioctl      = blockdev_ioctl
-};
 
 static int nvmet_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id){
 
@@ -441,195 +611,13 @@ static int nvmet_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         goto out_cdev_add;
     }
 
-    struct device * dev = device_create(nvme_class, NULL, MKDEV(MAJOR(nvme_chr_devt), pnvme_dev -> instance), NULL, "nvmet%d", pnvme_dev -> instance);
+    pnvme_dev -> sysdev = device_create(nvme_class, NULL, MKDEV(MAJOR(nvme_chr_devt), pnvme_dev -> instance), NULL, "nvmet%d", pnvme_dev -> instance);
     
-
-    if (IS_ERR(dev)) {
+    if (IS_ERR( pnvme_dev -> sysdev)) {
 		pr_err("couldn't create dev\n");
-		ret = PTR_ERR(dev);
+		ret = PTR_ERR( pnvme_dev -> sysdev);
 		goto out_device_create;
 	}
-
-
-
-
-
-
-    /* Here is block device setting */
-    //pnvme_dev -> bdev = kzalloc(sizeof(struct block_dev), GFP_KERNEL);
-
-    //if (!pnvme_dev->bdev){
-	//	ret = -ENOMEM;
-    //   goto out_kmalloc;
-    //}
-
-    //memset(&pnvme_dev->tag_set.ops, 0, sizeof(pnvme_dev ->tag_set.ops));
-    pnvme_dev->tag_set.cmd_size = 0;
-    pnvme_dev->tag_set.ops = &mq_ops;
-    pnvme_dev->tag_set.driver_data =  pnvme_dev;
-    //pnvme_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
-    pnvme_dev->tag_set.nr_hw_queues = 1;
-    pnvme_dev->tag_set.queue_depth = 128;
-    pnvme_dev->tag_set.numa_node = NUMA_NO_NODE;
-    printk("%s, %d\n", __func__ , __LINE__);
-
-   // ret = blk_mq_alloc_tag_set(&pnvme_dev ->bdev->tag_set);
-     
-   // if(ret = blk_mq_alloc_sq_tag_set(&pnvme_dev->tag_set, &mq_ops, 1, BLK_MQ_F_SHOULD_MERGE)){
-    if(ret = blk_mq_alloc_tag_set(&pnvme_dev ->tag_set)){
-        tprintk("Failed to allocate tag set\n");
-       ret = -ENOMEM; 
-        goto out_blk_mq_alloc_tag_set;
-    }
-
-    tprintk("%s, %d\n", __func__ , __LINE__);
-
-
-   // pnvme_dev->queue = blk_mq_init_queue(&pnvme_dev ->tag_set);
-
- //   if (IS_ERR(pnvme_dev->queue )) {
-   //      ret = -ENOMEM;
-   // 	goto out_blk_mq_init_queue;
-   // }
-    
-   // blk_queue_logical_block_size(pnvme_dev->queue, 512);
-   // pnvme_dev->queue->queuedata = pnvme_dev;
-
-
-    //pnvme_dev->queue = queue;
-
-   // struct gendisk* gendisk = blk_mq_alloc_disk(&pnvme_dev->tag_set, NULL);
-
-    pnvme_dev->gendisk = blk_alloc_disk(NUMA_NO_NODE);
-
-    if (IS_ERR( pnvme_dev->gendisk )) {
-        tprintk("Failed to allocate gendisk\n");
-		ret = PTR_ERR( pnvme_dev->gendisk );
-		goto out_blk_mq_alloc_disk;
-	}
-
-    pnvme_dev->queue = pnvme_dev->gendisk->queue; 
-    pnvme_dev->queue->queuedata = pnvme_dev;
-
-    //pnvme_dev ->queue = gendisk->queue;
-
-    //spin_lock_init(&pnvme_dev ->lock);
-
-    //struct request_queue *queue =  blk_init_queue(dummy_request, &pnvme_dev ->lock)
-
-    //pnvme_dev->queue = queue;
-
-
-    //struct request_queue *queue =  gendisk->queue;
-
-    //blk_queue_max_hw_sectors(queue, 409600000 >> 9);
-	//blk_queue_dma_alignment(queue, 4096-1);
-	//blk_queue_logical_block_size(queue, 4096);
-	//blk_queue_write_cache(queue, true, false);
-	//blk_queue_max_segments(queue, -1);
-	//blk_queue_max_segment_size(queue, 409600000);
-
-    //pnvme_dev ->bdev->queue = pnvme_dev ->bdev->gendisk->queue;
-
-    //pnvme_dev ->gendisk = gendisk;
-
-    //gendisk->flags |= GENHD_FL_NO_PART;
-    pnvme_dev->gendisk->major = blk_major;
-    pnvme_dev->gendisk->first_minor = 0;
-    pnvme_dev->gendisk->minors = 1;
-    pnvme_dev->gendisk->fops = &blockdev_ops;
-   // pnvme_dev->gendisk->queue =  pnvme_dev ->queue ;
-    pnvme_dev->gendisk->private_data = pnvme_dev;
-
-    snprintf( pnvme_dev->gendisk->disk_name, sizeof( pnvme_dev->gendisk->disk_name), "dummyblk%d", pnvme_dev -> instance);
-
-    set_capacity(pnvme_dev->gendisk, 102400);
-
-    tprintk("%s, %d\n", __func__ , __LINE__);
-
-    ret = add_disk( pnvme_dev->gendisk);
-    if (ret)
-        tprintk("Failed to adddisk\n");
-        ret = -ENOMEM; 
-		goto out_add_disk;
-
-    /* End of block device setting.　*/
-
-    tprintk("%s, %d\n", __func__ , __LINE__);
-
-
-#if 0
-
-    struct queue_limits lim = {0};
-
-    pnvme_dev -> bdev = kmalloc(sizeof(struct block_dev), GFP_KERNEL);
-    if (pnvme_dev -> bdev == NULL) {
-        printk("Failed to allocate struct block_dev\n");
-        //unregister_blkdev(pnvme_dev ->blk_major, pnvme_dev ->blkname);
-        //kfree(pnvme_dev ->blkname);
-        return -ENOMEM;
-    }
-
-    memset(&pnvme_dev -> bdev->tag_set, 0, sizeof(struct blk_mq_tag_set));
-
-#if 1
-    pnvme_dev ->bdev->tag_set.ops = &mq_ops;
-    pnvme_dev ->bdev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
-    pnvme_dev ->bdev->tag_set.nr_hw_queues = 1;
-    pnvme_dev ->bdev->tag_set.queue_depth = 128;
-    pnvme_dev ->bdev->tag_set.numa_node = NUMA_NO_NODE;
-    pnvme_dev ->bdev->tag_set.cmd_size = 64;
-    pnvme_dev ->bdev->tag_set.driver_data =  pnvme_dev -> bdev;
-#endif
-
-    ret = blk_mq_alloc_tag_set(&pnvme_dev -> bdev->tag_set);
-    if(ret){//このエラー処理を入れておかないとrmmodをしたときにひどいことになる。
-        printk("Failed to allocate tag set\n");
-        
-      //  unregister_blkdev(pnvme_dev ->blk_major, pnvme_dev ->blkname);
-      //  kfree(pnvme_dev ->blkname);
-        kfree( pnvme_dev ->bdev);
-        
-         return -ENOMEM;
-    }
-
-    pnvme_dev ->bdev->queue = blk_mq_init_queue(&pnvme_dev ->bdev->tag_set);
-
-    if (pnvme_dev ->bdev->queue == NULL) {
-        printk("Failed to allocate device queue\n");
-        blk_mq_free_tag_set(&pnvme_dev ->bdev->tag_set);
-       // unregister_blkdev(pnvme_dev ->blk_major, pnvme_dev ->blkname);
-       // kfree(pnvme_dev ->blkname);
-        kfree( pnvme_dev ->bdev);
-       
-        return -ENOMEM;
-    }
-
-    pnvme_dev ->bdev->queue->queuedata = pnvme_dev ->bdev;
-
-    pnvme_dev ->bdev->gendisk = blk_mq_alloc_disk(&priv->tag_set, &lim, dev);
-    pnvme_dev ->bdev->gendisk->flags = GENHD_FL_NO_PART_SCAN;
-    pnvme_dev ->bdev->gendisk->major =  blk_major;
-    pnvme_dev ->bdev->gendisk->first_minor = 0;
-    pnvme_dev ->bdev->gendisk->fops = &blockdev_ops;
-    pnvme_dev ->bdev->gendisk->queue = pnvme_dev ->bdev->queue;
-    pnvme_dev ->bdev->gendisk->private_data = pnvme_dev ->bdev;
-
-    snprintf (pnvme_dev ->bdev->gendisk->disk_name, 32, "blkdev");
-
-    set_capacity(pnvme_dev ->bdev->gendisk, 4096);
-
-    add_disk(bdev->gendisk);
-
-
-#endif
-
-
-
-
-
-
-
 
 
     if (ret = pci_enable_device_mem(pdev)){
@@ -651,7 +639,7 @@ static int nvmet_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
     n = pci_alloc_irq_vectors(pdev, 1, vectors, PCI_IRQ_ALL_TYPES | PCI_IRQ_AFFINITY);
 
-    tprintk("vector num: %d\n", n);
+    pr_info("vector num: %d\n", n);
 
     if (n < 0) {
         ret = -ENOMEM;
@@ -661,12 +649,31 @@ static int nvmet_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     INIT_LIST_HEAD(&pnvme_dev->memlist);   
     INIT_LIST_HEAD(&pnvme_dev->signallist);   
 
+#if defined(USE_DUMMYBLK_LIST)
+
+    INIT_LIST_HEAD(&pnvme_dev->dummyblklist);
+#else
+    pnvme_dev-> dummyblk_entry_p = kzalloc(sizeof(struct dummyblk_entry) * NUM_OF_DUMMY_FOR_EACH, GFP_KERNEL);
+            
+    if(IS_ERR_OR_NULL(pnvme_dev->dummyblk_entry_p)){
+        ret = PTR_ERR(pnvme_dev->dummyblk_entry_p);
+        goto out_kzalloc;
+    }       
+
+    for(int i=0; i< NUM_OF_DUMMY_FOR_EACH; ++i){
+        pnvme_dev -> dummyblk_entry_p[i].gendisk = NULL;
+    }
+#endif
     return ret;
+
+
+out_kzalloc:
+    pci_free_irq_vectors(pdev);
 
 
 out_pci_alloc_irq_vectors:
     pci_set_drvdata(pdev, NULL);
-    pci_release_regions(pdev);
+    pci_release_regions(pdev);  
 
 out_pci_request_regions:
 
@@ -674,29 +681,12 @@ out_dma_set_mask_and_coherent:
     pci_disable_device(pdev);
 
 out_pci_enable_device:
-    del_gendisk(pnvme_dev ->gendisk);
-
-out_add_disk:
-    put_disk(pnvme_dev ->gendisk);
-
-out_blk_mq_alloc_disk:
- //   blk_mq_destroy_queue(pnvme_dev -> queue);
-
-out_blk_mq_init_queue:
- //   blk_mq_free_tag_set(&pnvme_dev ->tag_set);
-
-out_blk_mq_alloc_tag_set:
-//    kfree(pnvme_dev -> bdev );
-
-//out_kmalloc:
     device_destroy(nvme_class, pnvme_dev -> devt );
 
 out_device_create:
-
     cdev_del(&pnvme_dev->cdev); 
 
 out_cdev_add:
-
     ida_simple_remove(&nvme_instance_ida, pnvme_dev -> instance );
 
 out_ida_simple_get:
@@ -708,16 +698,52 @@ out_alloc_pnvme_dev:
 }
 
 static void nvmet_pci_remove(struct pci_dev* pdev){
-    tprintk("%s\n", __func__);
+    pr_info("%s\n", __func__);
 
     struct nvme_dev *pnvme_dev = pci_get_drvdata(pdev);
     pnvme_dev->is_open = 0;
+
+#if defined(USE_DUMMYBLK_LIST)
+
+    struct dummyblk_entry *dummyblk_list_h;
+    struct dummyblk_entry *dummyblk_list_e = NULL;
+
+    list_for_each_entry_safe(dummyblk_list_h, dummyblk_list_e, &pnvme_dev->dummyblklist, list) {
+        pr_info("remove dummy block\n");
+        list_del(&dummyblk_list_h->list);
+        
+        del_gendisk(dummyblk_list_h->gendisk);
+        blk_put_queue(dummyblk_list_h->gendisk->queue);
+	    put_disk(dummyblk_list_h->gendisk);
+        
+        kfree(dummyblk_list_h);
+    }
+
+#else
+
+
+    for(int i=0; i< NUM_OF_DUMMY_FOR_EACH; ++i){
+        if(pnvme_dev -> dummyblk_entry_p[i].gendisk != NULL){
+            //pr_info("%s: safe remove dummyblk\n", __func__);
+            del_gendisk(pnvme_dev -> dummyblk_entry_p[i].gendisk);
+            blk_put_queue(pnvme_dev -> dummyblk_entry_p[i].gendisk->queue);
+	        put_disk(pnvme_dev -> dummyblk_entry_p[i].gendisk);
+        
+            for(int j=0; j< pnvme_dev->dummyblk_entry_p[i].npages; ++j) put_page(pnvme_dev->dummyblk_entry_p[i].pages[j]);
+            kfree(pnvme_dev->dummyblk_entry_p[i].pages);
+            pnvme_dev -> dummyblk_entry_p[i].gendisk = NULL;
+        }
+    }
+
+    kfree( pnvme_dev->dummyblk_entry_p);
+
+#endif
 
     struct dma_entry *dma_list_h;
     struct dma_entry *dma_list_e = NULL;
 
     list_for_each_entry_safe(dma_list_h, dma_list_e, &pnvme_dev->memlist, list) {
-        tprintk("safe remove in remove\n");
+        pr_info("safe remove in remove\n");
 
         list_del(&dma_list_h->list);
 		dma_free_coherent (&pnvme_dev -> pdev->dev, dma_list_h->size, dma_list_h->virt_addr, dma_list_h->dma_addr);
@@ -736,21 +762,13 @@ static void nvmet_pci_remove(struct pci_dev* pdev){
         
     }
 
+
+
     pci_free_irq_vectors(pnvme_dev->pdev);
     pci_set_drvdata(pdev, NULL);
 	pci_release_regions(pdev);
     pci_disable_device(pdev);
 
-    del_gendisk(pnvme_dev ->gendisk);
-    put_disk(pnvme_dev ->gendisk);
-
-
-
-  ///  	blk_cleanup_queue(pnvme_dev ->queue);
-   // blk_mq_destroy_queue(pnvme_dev -> queue);
-
-   // blk_mq_free_tag_set(&pnvme_dev ->tag_set);
-    //kfree(pnvme_dev -> bdev );
 
 
     device_destroy(nvme_class, pnvme_dev->devt );
@@ -773,16 +791,16 @@ static struct pci_driver simple_nvme_driver = {
     .shutdown = nvme_shutdown,
 };
 
-/* インストール時に実行 */
 static int nvmet_init(void) {
     int ret;
-    tprintk("%s\n", __func__);
+    pr_info("%s\n", __func__);
 
     ida_init(&nvme_instance_ida);
 
 	ret = alloc_chrdev_region(&nvme_chr_devt, 0, NVME_MINORS, DEVICE_NAME);
 	if (ret != 0){
         printk(KERN_ERR "%d: %s()   %d",__LINE__, __FUNCTION__, ret ); 
+        ida_destroy(&nvme_instance_ida);
         return ret;
     }
 
@@ -795,21 +813,29 @@ static int nvmet_init(void) {
 	if (IS_ERR(nvme_class)) {
 		ret = PTR_ERR(nvme_class);
         unregister_chrdev_region(nvme_chr_devt, NVME_MINORS);
+        ida_destroy(&nvme_instance_ida);
 		return ret;
 	}
 
-
-    blk_major = register_blkdev(0, "testblk");
+    blk_major = register_blkdev(0, "dummyblk");
 
     if (blk_major < 0) {
+        class_destroy(nvme_class);
+        unregister_chrdev_region(nvme_chr_devt, NVME_MINORS);
+        ida_destroy(&nvme_instance_ida);
+
 		return blk_major;
 	}
-
-
 
     ret = pci_register_driver(&simple_nvme_driver); //ドライバー名、table, コールバック関数(probe, remove)を登録
     if(ret != 0){
         printk(KERN_ERR "%d: %s()   %d",__LINE__, __FUNCTION__, ret );     
+         unregister_blkdev(blk_major, "dummyblk");
+
+        class_destroy(nvme_class);
+        unregister_chrdev_region(nvme_chr_devt, NVME_MINORS);
+        ida_destroy(&nvme_instance_ida);
+
         return ret;
     }
 
@@ -819,11 +845,11 @@ static int nvmet_init(void) {
 /* アンインストール時に実行 */
 static void nvmet_exit(void) {
 
-    tprintk("%s\n", __func__);
+    pr_info("%s\n", __func__);
 
     pci_unregister_driver(&simple_nvme_driver);  //ドライバー名、table, コールバック関数(probe, remove)を削除  
 
-    unregister_blkdev(blk_major, "testblk");
+    unregister_blkdev(blk_major, "dummyblk");
 
     class_destroy(nvme_class);
     unregister_chrdev_region(nvme_chr_devt, NVME_MINORS);

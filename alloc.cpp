@@ -40,26 +40,47 @@ int main(void)
 
 	//printf("%lx, %lx\n", param.m.kernel_virtaddr, param.m.dma_addr);
 
+	rc = ioctl(fd, IOCTL_RELEASE_MEM, &param);
+
+	void *p;
+	int ret = posix_memalign(&p, 4096, 4096*5);
+
+	printf("udata: %p\n", p);
 
 
-	 rc = ioctl(fd, IOCTL_RELEASE_MEM, &param);
+	param.d.number = 0;
+	param.d.len = 4096*5;
+	param.d.buf = (__le64)p;;
+
+	rc = ioctl(fd, IOCTL_ALLOC_DUMMYBLK, &param);
+
+	uint8_t* p8= (uint8_t*)p;
+	p8[0] = 0xAA;	
+	p8[1] = 0xBB;	
+	p8[2] = 0xCC;	
+	p8[3] = 0xDD;	
+
+	//param.d.number = 1;
+	//rc = ioctl(fd, IOCTL_ALLOC_DUMMYBLK, &param);
+
+
+	//param.d.number = 2;
+	//rc = ioctl(fd, IOCTL_ALLOC_DUMMYBLK, &param);
+
+
+//	param.d.number = 3;
+//	rc = ioctl(fd, IOCTL_ALLOC_DUMMYBLK, &param);
 
 
 
 
-
-
-
-
-
+//	sleep(10);
 
 
 
 #if 0
 	rc = ioctl(fd, IOCTL_GET_BDF, &param);
 	printf("%x:%x.%x\n", param.b.bus, param.b.dev, param.b.func);
-
-
 
 	kadr = (unsigned int *)mmap(0, len, PROT_READ|PROT_WRITE, MAP_SHARED| MAP_LOCKED,fd, 0);
 
@@ -73,7 +94,7 @@ int main(void)
 	printf("%lx, %lx\n", param.m.kernel_virtaddr, param.m.dma_addr);
 #endif
 
-	
+	free(p);
 	close(fd);
 	return(0);
 }
