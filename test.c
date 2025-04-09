@@ -10,13 +10,18 @@
 #include <linux/blkdev.h>
 
 #include <linux/part_stat.h>
+#include <linux/jiffies.h>
+#include <linux/proc_fs.h>
 #include "common.h"
 
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("Simple NVMe Device Driver");
 
+
 #define DEVICE_NAME "nvmet"
 #define NVME_MINORS		(1U << MINORBITS)
+
+#define PROC_NAME "jiffies"
 
 #undef USE_DUMMYBLK_LIST  /* This define is not complete, and already not mentenance. */
 #define NUM_OF_DUMMY_FOR_EACH    (128)
@@ -146,7 +151,11 @@ static int nvmet_pci_close(struct inode* inode, struct file* filp){
         list_del(&dummyblk_list_h->list);
         
         del_gendisk(dummyblk_list_h->gendisk);
-        blk_put_queue(dummyblk_list_h->gendisk->queue);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,12)
+        blk_put_queue(dev->gendisk->queue);
+#else 
+        blk_cleanup_queue(dev->disk->queue);
+#endif
 	    put_disk(dummyblk_list_h->gendisk);
         
         kfree(dummyblk_list_h);
@@ -158,8 +167,11 @@ static int nvmet_pci_close(struct inode* inode, struct file* filp){
             //pr_info("%s: safe remove dummyblk\n", __func__);
             del_gendisk(pnvme_dev -> dummyblk_entry_p[i].gendisk);
 
-	        //blk_cleanup_queue(dev->disk->queue);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,12)
             blk_put_queue(pnvme_dev -> dummyblk_entry_p[i].gendisk->queue);
+#else 
+            blk_cleanup_queue(pnvme_dev -> dummyblk_entry_p[i].gendisk->queue);
+#endif
 	        put_disk(pnvme_dev -> dummyblk_entry_p[i].gendisk);
 
             /* This is test code.*/
@@ -249,7 +261,11 @@ out_kzalloc:
 static irqreturn_t msix_irq(int irq, void *arg)
 {
     struct eventfd_ctx *trigger = arg;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,12)
 	eventfd_signal(trigger);
+#else
+    eventfd_signal(trigger, 1);
+#endif
 	return IRQ_HANDLED; 
 }
 
@@ -258,7 +274,11 @@ static irqreturn_t intx_irq(int irq, void *arg)
 	struct nvme_dev *pnvme_dev = arg;
 
 	if (pci_check_and_mask_intx(pnvme_dev->pdev)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,12)
 		eventfd_signal(pnvme_dev->trigger);
+#else
+        eventfd_signal(pnvme_dev->trigger, 1);
+#endif
 		return IRQ_HANDLED;
 	}
 
@@ -308,8 +328,11 @@ int dummyblk_add(int major, struct nvme_dev * pnvme_dev, int number, struct page
 	//ret = device_add_disk(p->sysdev, gdisk, NULL);
     
     if (ret) {
-        //blk_cleanup_queue(gdisk->queue);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,12)
         blk_put_queue(gdisk->queue);
+#else 
+        blk_cleanup_queue(gdisk->queue);
+#endif
 	    put_disk(gdisk);
         
         kfree(entry);
@@ -327,7 +350,11 @@ int dummyblk_add(int major, struct nvme_dev * pnvme_dev, int number, struct page
         pnvme_dev -> dummyblk_entry_p[number].npages = npages;    
     }else {   // alreay set 
         del_gendisk(gdisk);
-        blk_put_queue(gdisk->queue);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,12)
+        blk_put_queue(pnvme_dev -> dummyblk_entry_p[number].gendisk->queue);
+#else 
+        blk_cleanup_queue(pnvme_dev -> dummyblk_entry_p[number].gendisk->queue);
+#endif
 	    put_disk(gdisk);
         
         kfree(entry);
@@ -342,9 +369,12 @@ int dummyblk_add(int major, struct nvme_dev * pnvme_dev, int number, struct page
 void dummyblk_remove(struct dummyblk_entry *dev)
 {
 	del_gendisk(dev->gendisk);
-
-	//blk_cleanup_queue(dev->disk->queue);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,12)
     blk_put_queue(dev->gendisk->queue);
+#else 
+    blk_cleanup_queue(dev->disk->queue);
+#endif
+
 	put_disk(dev->gendisk);
 
 	kfree(dev);
@@ -488,6 +518,10 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
                 return -EFAULT;
             }
 
+            if( params.d.number >= NUM_OF_DUMMY_FOR_EACH ){
+                return -EFAULT;
+            }
+
             // get_user_page
             unsigned long udata = (unsigned long)params.d.buf;
             pr_info("udata: %x\n", udata);
@@ -533,19 +567,11 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
             up_read(&current->mm->mmap_sem);
 #endif
 
-          //  uint8_t *data = (uint8_t*) pages;
-
-          //  pr_info("%d\n", *data);
-
-          //  for(int i=0; i<npages; ++i) put_page(pages[i]);
-
-          //  kfree(pages);
-
             dummyblk_add(blk_major, pnvme_dev, params.d.number, pages, npages);
 
             break;
 
-        case IOCTL_REGISTER_STATS:
+        case IOCTL_RECORD_STATS:
 
 #if defined(USE_DUMMYBLK_LIST)
             
@@ -569,6 +595,31 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
     return ret;
 }
 
+ssize_t proc_read(struct file *file, char __user *ubuf, size_t count, loff_t *pos)
+{
+    char buf[32] = {0};
+
+    static int completed = 0;
+    if (completed) {
+            completed = 0;
+            return 0;
+    }
+    completed = 1;
+
+    int len = sprintf(buf, "%llu\n", jiffies);
+    copy_to_user(ubuf, buf, len);
+	return len;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,6,0)
+static const struct proc_ops proc_ops = {
+    .proc_read	 = proc_read,
+};
+#else 
+static const struct file_operations proc_ops = {
+    .read = proc_read,
+};
+#endif
 
 static const struct file_operations nvme_chr_fops = {
     .owner          = THIS_MODULE,
@@ -626,7 +677,8 @@ static int nvmet_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
     pci_set_master(pdev);
 
-    if (ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64)) && dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32))){
+    if (ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64)) /*&& dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32))*/){
+        pr_err("Error dma_set_mask_and_coherent\n");
         goto out_dma_set_mask_and_coherent;
     }
 
@@ -713,7 +765,11 @@ static void nvmet_pci_remove(struct pci_dev* pdev){
         list_del(&dummyblk_list_h->list);
         
         del_gendisk(dummyblk_list_h->gendisk);
-        blk_put_queue(dummyblk_list_h->gendisk->queue);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,12)
+        blk_put_queue(dev->gendisk->queue);
+#else 
+        blk_cleanup_queue(dev->disk->queue);
+#endif
 	    put_disk(dummyblk_list_h->gendisk);
         
         kfree(dummyblk_list_h);
@@ -726,7 +782,11 @@ static void nvmet_pci_remove(struct pci_dev* pdev){
         if(pnvme_dev -> dummyblk_entry_p[i].gendisk != NULL){
             //pr_info("%s: safe remove dummyblk\n", __func__);
             del_gendisk(pnvme_dev -> dummyblk_entry_p[i].gendisk);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,12)
             blk_put_queue(pnvme_dev -> dummyblk_entry_p[i].gendisk->queue);
+#else 
+            blk_cleanup_queue(pnvme_dev -> dummyblk_entry_p[i].disk->queue);
+#endif
 	        put_disk(pnvme_dev -> dummyblk_entry_p[i].gendisk);
         
             for(int j=0; j< pnvme_dev->dummyblk_entry_p[i].npages; ++j) put_page(pnvme_dev->dummyblk_entry_p[i].pages[j]);
@@ -829,8 +889,8 @@ static int nvmet_init(void) {
 
     ret = pci_register_driver(&simple_nvme_driver); //ドライバー名、table, コールバック関数(probe, remove)を登録
     if(ret != 0){
-        printk(KERN_ERR "%d: %s()   %d",__LINE__, __FUNCTION__, ret );     
-         unregister_blkdev(blk_major, "dummyblk");
+        pr_err("%d: %s()   %d",__LINE__, __FUNCTION__, ret );     
+        unregister_blkdev(blk_major, "dummyblk");
 
         class_destroy(nvme_class);
         unregister_chrdev_region(nvme_chr_devt, NVME_MINORS);
@@ -838,6 +898,22 @@ static int nvmet_init(void) {
 
         return ret;
     }
+
+
+    struct proc_dir_entry *entry = proc_create(PROC_NAME, S_IRUGO, NULL, &proc_ops);
+	if (!entry ) {
+		pr_err("proc_create\n");
+
+        pci_unregister_driver(&simple_nvme_driver);
+        unregister_blkdev(blk_major, "dummyblk");
+
+        class_destroy(nvme_class);
+        unregister_chrdev_region(nvme_chr_devt, NVME_MINORS);
+        ida_destroy(&nvme_instance_ida);
+
+		return -ENOENT;
+	}
+
 
     return ret; 
 }
@@ -847,6 +923,7 @@ static void nvmet_exit(void) {
 
     pr_info("%s\n", __func__);
 
+    remove_proc_entry(PROC_NAME, NULL);
     pci_unregister_driver(&simple_nvme_driver);  //ドライバー名、table, コールバック関数(probe, remove)を削除  
 
     unregister_blkdev(blk_major, "dummyblk");

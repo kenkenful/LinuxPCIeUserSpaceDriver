@@ -40,11 +40,13 @@ struct test_params{
 
 };
 
-
-struct stats{
-
-
-
+struct stats {
+    unsigned long sectors[2];   /* READs and WRITEs */  // rsec/s wsec/s avgrq-sz
+    unsigned long ios[2];  // r/s w/s
+    unsigned long merges[2]; // rrqm/s wrqm/s
+    unsigned long ticks[2];  // await r_wait w_wait
+    unsigned long io_ticks; // %util svctm
+    unsigned long time_in_queue; // avgqu-sz
 };
 
 
@@ -59,7 +61,7 @@ struct stats{
 
 #define IOCTL_ALLOC_DUMMYBLK _IOW(NVME, 5, struct test_params*)
 
-#define IOCTL_REGISTER_STATS _IOW(NVME, 6, struct test_params*)
+#define IOCTL_RECORD_STATS _IOW(NVME, 6, struct test_params*)
 
 
 #endif
