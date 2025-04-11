@@ -23,6 +23,11 @@ struct bus{
 
 };
 
+struct jiffies{
+    __le64  buf;
+    __le64  phys_addr;
+};
+
 
 struct dummyblk{
     int     number;
@@ -36,6 +41,7 @@ struct test_params{
         struct mem m;
         struct bus b;
         struct dummyblk d;
+        struct jiffies j;
     };
 
 };
@@ -50,18 +56,17 @@ struct stats {
 };
 
 
-
-
 // ioctls
 #define NVME 'N'
-#define IOCTL_SET_SIGNAL    _IOW(NVME, 1, struct test_params*)
-#define IOCTL_GET_MEMFINFO  _IOW(NVME, 2, struct test_params*)
-#define IOCTL_GET_BDF       _IOW(NVME, 3, struct test_params*)
-#define IOCTL_RELEASE_MEM   _IOW(NVME, 4, struct test_params*)
-
-#define IOCTL_ALLOC_DUMMYBLK _IOW(NVME, 5, struct test_params*)
-
-#define IOCTL_RECORD_STATS _IOW(NVME, 6, struct test_params*)
+#define IOCTL_SET_SIGNAL            _IOW(NVME, 1, struct test_params*)
+#define IOCTL_GET_MEMFINFO          _IOW(NVME, 2, struct test_params*)
+#define IOCTL_GET_BDF               _IOW(NVME, 3, struct test_params*)
+#define IOCTL_RELEASE_MEM           _IOW(NVME, 4, struct test_params*)    
+#define IOCTL_ALLOC_DUMMYBLK        _IOW(NVME, 5, struct test_params*)    
+#define IOCTL_RECORD_STATS          _IOW(NVME, 6, struct test_params*)    
+#define IOCTL_SETUP_JIFFIES         _IOW(NVME, 7, struct test_params*)
+#define IOCTL_GET_JIFFIES           _IOW(NVME, 8, struct test_params*)
+#define IOCTL_GET_PHYSADDR_JIFFIES  _IOW(NVME, 9, struct test_params*)
 
 
 #endif

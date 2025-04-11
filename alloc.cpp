@@ -37,11 +37,11 @@ int main(void)
 
 	int rc = ioctl(fd, IOCTL_GET_MEMFINFO, &param);
 
-
-	//printf("%lx, %lx\n", param.m.kernel_virtaddr, param.m.dma_addr);
+	printf("kernel virt addr: %p, %lx\n", param.m.kernel_virtaddr, param.m.dma_addr);
 
 	rc = ioctl(fd, IOCTL_RELEASE_MEM, &param);
 
+#if 0
 	void *p;
 	int ret = posix_memalign(&p, 4096, 4096*5);
 
@@ -60,25 +60,25 @@ int main(void)
 	p8[2] = 0xCC;	
 	p8[3] = 0xDD;	
 
-	//param.d.number = 1;
-	//rc = ioctl(fd, IOCTL_ALLOC_DUMMYBLK, &param);
 
 
-	//param.d.number = 2;
-	//rc = ioctl(fd, IOCTL_ALLOC_DUMMYBLK, &param);
+	void *val;
+	ret = posix_memalign(&val, 4096, 4096);
+
+	param.j.buf = (__le64)val;
+
+	rc = ioctl(fd, IOCTL_SETUP_JIFFIES, &param);
+	rc = ioctl(fd, IOCTL_GET_JIFFIES, &param);
+
+	printf("jiffies: %ld\n", *(uint64_t*)val);
 
 
-//	param.d.number = 3;
-//	rc = ioctl(fd, IOCTL_ALLOC_DUMMYBLK, &param);
-
-
+	rc = ioctl(fd, IOCTL_GET_PHYSADDR_JIFFIES, &param);
+	printf("jiffies phys addr: %llx\n", param.j.phys_addr);
 
 
 //	sleep(10);
 
-
-
-#if 0
 	rc = ioctl(fd, IOCTL_GET_BDF, &param);
 	printf("%x:%x.%x\n", param.b.bus, param.b.dev, param.b.func);
 
@@ -92,9 +92,11 @@ int main(void)
 
 	rc = ioctl(fd, IOCTL_GET_MEMFINFO, &param);
 	printf("%lx, %lx\n", param.m.kernel_virtaddr, param.m.dma_addr);
+	
+	free(p);
+
 #endif
 
-	free(p);
 	close(fd);
 	return(0);
 }
