@@ -11,6 +11,9 @@
 #include <memory>
 #include <pthread.h>
 #include <cassert>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <cstring>
 #include "common.h"
 #include "nvme.h"
 
@@ -28,11 +31,15 @@ public:
         get_pci_config_addr();
         get_bar0();
         map_ctrlreg();
+        
+        printf("pci_addr: %lx\n", pci_addr);
+        printf("bar0: %lx\n", bar0);
     }
 
     ~GenPci(){
-        printf("pci_addr: %lx\n", pci_addr);
-        printf("bar0: %lx\n", bar0);
+        close(efd);
+        close(epfd);
+
 
         pthread_mutex_destroy(&alloc_dma_m);
 
@@ -145,8 +152,52 @@ public:
 
     }
 
+    void set_MSIX(char* name, int vector){
+        efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        //ASSERT(efd >= 0, "efd init failed");
+        if(efd < 0){
+            exit(-1);
+        }
+
+        epfd = epoll_create1(EPOLL_CLOEXEC);
+        //ASSERT(epfd >= 0, "failed to create epoll fd");
+        if(epfd < 0){
+            exit(-1);
+        }
+
+        // Add eventfd to epoll
+        struct epoll_event ev = {0}; //{.events = EPOLLIN | EPOLLPRI,
+                                     //.data.fd = dev->efds[i]};
+        ev.events = EPOLLIN | EPOLLPRI;
+        ev.data.fd = efd;
+
+        int ret = epoll_ctl(epfd, EPOLL_CTL_ADD, efd, &ev);
+        //ASSERT(ret == 0, "cannot add fd to epoll");
+        if(ret != 0){
+            exit(-1);
+        }
+
+        //std::thread th(func, &epfd);
+        sleep(3);
+
+        struct test_params params;
+        params.s.fd = efd;
+        params.s.msix = true;
+        strncpy(params.s.name, name, 32); 
+
+        params.s.vector = vector;
+
+        int rc = ioctl(genpcifd, IOCTL_SET_SIGNAL  , &params);
+        if(rc){
+            perror("ioctl");
+            exit(-1);
+        }
+    }
 
 private:
+    int efd;
+    int epfd;
+
     pthread_mutex_t	alloc_dma_m;
 
     char devname[20] = {0};
@@ -169,62 +220,54 @@ public:
 
     NVMeCtrl(int instance_no):GenPci(instance_no){
         ctrl_reg = (nvme_controller_reg_t*)bar0_virt;
-        cap = &ctrl_reg->cap;
-
-        uint64_t dma_addr;
-        void* p = alloc_dma(4096, dma_addr);
-        printf("virtual addr: %p\n", p);
-        printf("dma addr: %lx\n", dma_addr);
-
+        init_ctrl();
+        char name[32] = {0};
+        sprintf(name, "testirq%d", instance_no);
+        set_MSIX(name, 0);
+   
     }
 
-    ~NVMeCtrl(){
-
-
-    }
+    ~NVMeCtrl(){}
 
     bool wait_ready(){
         int cnt = 0;
-        nvme_controller_cap_t cap = { 0 };
-        cap.val = ctrl_reg->cap.val;
+        ctrl_reg->cc.a.en = 1;
 
         while (ctrl_reg->csts.rdy == 0) {
-		    if (cnt++ > cap.a.to) {
+		    if (cnt++ >  ctrl_reg->cap.a.to) {
 		    	std::cerr << "timeout: controller enable" << std::endl;
 		    	return false;
 		    }
+            usleep(500000);         
         }
-		sleep(500);
 
         return true;
     }
 
     bool wait_not_ready(){
         int cnt = 0;
-      
-        cap->val = ctrl_reg->cap.val;
-
         ctrl_reg->cc.a.en = 0;
         while (ctrl_reg->csts.rdy == 1) {
-		printf("Waiting  controller disable: %d\n", ctrl_reg->csts.rdy);
-		    if (cnt++ > cap->a.to) {
+		    printf("Waiting  controller disable: %d\n", ctrl_reg->csts.rdy);
+		    if (cnt++ > ctrl_reg->cap.a.to) {
 		    	std::cerr << "timeout: controller disable" << std::endl;
 		    	return false;
 		    }
+            usleep(500000);         
         }
-		sleep(500);
+        std::cout << "controller is not ready" << std::endl;
 
         return true;
     }
 
-    void init_adminQ(int cq_sz, int sq_sz){
+    void init_adminQ(int cq_depth, int sq_depth){
         nvme_adminq_attr_t	aqa = { 0 };
         admin_sq_tail = 0;
 	    admin_cq_head = 0;
 	    admin_cq_phase = 1;
 
-	    admin_cq_size = cq_sz;
-	    admin_sq_size = sq_sz;
+	    admin_cq_size = cq_depth;
+	    admin_sq_size = sq_depth;
         
         ctrl_reg->aqa.a.acqs = admin_cq_size -1;
         ctrl_reg->aqa.a.asqs = admin_sq_size -1;
@@ -245,37 +288,30 @@ public:
         admin_sq_doorbell = &ctrl_reg->sq0tdbl[0];
 	    admin_cq_doorbell = &ctrl_reg->sq0tdbl[0] + (1 << ctrl_reg->cap.a.dstrd);
 
-
     }
-
-
 
     bool init_ctrl(){
         bool ret = true;
-	    nvme_controller_config_t cc = { 0 };
-
-       
-
 
         ret = wait_not_ready();
 
-        //aqa.a.acqs = admin_cq_size - 1;
-	    //aqa.a.asqs = admin_sq_size - 1;
-	    //ctrl_reg->aqa.val = aqa.val;
+        init_adminQ(64,64);
 
-        //ctrl_reg->acq = (u64)adminCQ.phyAddr;
-	    //ctrl_reg->asq = (u64)adminSQ.phyAddr;
+        ctrl_reg ->cc.val = NVME_CC_CSS_NVM;
+	    ctrl_reg ->cc.val |= 0 << NVME_CC_MPS_SHIFT;
+	    ctrl_reg ->cc.val |= NVME_CC_AMS_RR | NVME_CC_SHN_NONE;
+	    ctrl_reg ->cc.val |= NVME_CC_IOSQES | NVME_CC_IOCQES;
 
         ret = wait_ready();
-
-
+        if(ret == true){
+            std::cout << "controller is ready" << std::endl;
+        }
 
         return ret;
     }
 
 private:
     nvme_controller_reg_t* ctrl_reg;
-    nvme_controller_cap_t* cap;
 
     int admin_cq_size;
 	int admin_sq_size;
@@ -300,5 +336,6 @@ private:
 
 int main(){
     std::shared_ptr<NVMeCtrl> p = std::make_shared<NVMeCtrl>(0);
+    sleep(10);
 
 }

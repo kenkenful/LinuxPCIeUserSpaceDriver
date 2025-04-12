@@ -132,7 +132,7 @@ static int genpci_close(struct inode* inode, struct file* filp){
     }
     
     list_for_each_entry_safe(dma_list_h, dma_list_e, &pgenpci_dev->memlist, list) {
-        pr_info("safe remove in close\n");
+        pr_info("safe remove dma in close\n");
 
         list_del(&dma_list_h->list);
 		dma_free_coherent (&pgenpci_dev -> pdev->dev, dma_list_h->size, dma_list_h->virt_addr, dma_list_h->dma_addr);
@@ -140,14 +140,15 @@ static int genpci_close(struct inode* inode, struct file* filp){
         
     }
 
-    struct signal_entry *single_list_h;
-    struct signal_entry *single_list_e = NULL;
+    struct signal_entry *singnal_list_h;
+    struct signal_entry *singnal_list_e = NULL;
 
-    list_for_each_entry_safe(single_list_h, single_list_e, &pgenpci_dev->signallist, list) {
-        list_del(&single_list_h->list);
-        free_irq(single_list_h->irq_no, single_list_h -> id);
-        eventfd_ctx_put(single_list_h -> trigger);
-        kfree(single_list_h);
+    list_for_each_entry_safe(singnal_list_h, singnal_list_e, &pgenpci_dev->signallist, list) {
+        pr_info("safe remove signal in close\n");
+        list_del(&singnal_list_h->list);
+        free_irq(singnal_list_h->irq_no, singnal_list_h -> id);
+        eventfd_ctx_put(singnal_list_h -> trigger);
+        kfree(singnal_list_h);
         
     }
 
@@ -393,7 +394,7 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
     struct genpci_dev *pgenpci_dev = filp->private_data;
 
     struct eventfd_ctx *trigger;
-    char *name = NULL;
+   // char *name = NULL;
 
     struct dma_entry *ptr;
     struct test_params params = {0};
@@ -405,25 +406,25 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
                 return ret;
             }
 
-            name = kasprintf(GFP_KERNEL, KBUILD_MODNAME "[%d](%s)", params.s.vector, pci_name(pgenpci_dev->pdev));
-
-            if(name == NULL){
-                return -EFAULT;
-            }
+            //name = kasprintf(GFP_KERNEL, KBUILD_MODNAME "%d.%d", pgenpci_dev->instance, params.s.vector);
+            //pr_info("%s\n", name);
+            //if(name == NULL){
+            //    return -EFAULT;
+            // }
 
             trigger = eventfd_ctx_fdget(params.s.fd);
 	        if (IS_ERR(trigger)) {
                 printk(KERN_ERR "trigger");
-                kfree(name);
+            //    kfree(name);
                 return -EFAULT;
 	        }    
             
             if(params.s.msix){
-                pr_info("set msix: %s\n",  name);
+            //    pr_info("set msix: %s\n",  name);
                 ret = request_irq(pci_irq_vector(pgenpci_dev->pdev, params.s.vector), 
                                       msix_irq, 
                                       0, 
-                                      name, 
+                                      params.s.name, 
                                         trigger
                                       );
             }else{
@@ -431,19 +432,19 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
                 ret = request_irq(pci_irq_vector(pgenpci_dev->pdev, 0),
                                       intx_irq, 
                                       IRQF_SHARED, 
-                                      name, 
+                                      params.s.name, 
                                       pgenpci_dev
                                       );
             }
 
             if (ret) {
                 dev_notice(&pgenpci_dev->pdev->dev, "request irq failed: %d\n", ret);
-                kfree(name);
+            //    kfree(name);
                 eventfd_ctx_put(trigger);
                 return ret;
             }
 
-            kfree(name);
+           // kfree(name);
 
             struct signal_entry *head = kzalloc(sizeof(struct signal_entry), GFP_KERNEL);
             
@@ -864,14 +865,14 @@ static void genpci_remove(struct pci_dev* pdev){
         
     }
 
-    struct signal_entry *single_list_h;
-    struct signal_entry *single_list_e = NULL;
+    struct signal_entry *singnal_list_h;
+    struct signal_entry *singnal_list_e = NULL;
 
-    list_for_each_entry_safe(single_list_h, single_list_e, &pgenpci_dev->signallist, list) {
-        list_del(&single_list_h->list);
-        free_irq(single_list_h->irq_no , single_list_h->id);
-        eventfd_ctx_put(single_list_h -> trigger);
-        kfree(single_list_h);        
+    list_for_each_entry_safe(singnal_list_h, singnal_list_e, &pgenpci_dev->signallist, list) {
+        list_del(&singnal_list_h->list);
+        free_irq(singnal_list_h->irq_no , singnal_list_h->id);
+        eventfd_ctx_put(singnal_list_h -> trigger);
+        kfree(singnal_list_h);        
     }
 
     pci_free_irq_vectors(pgenpci_dev->pdev);
