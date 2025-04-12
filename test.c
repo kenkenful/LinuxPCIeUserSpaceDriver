@@ -15,11 +15,11 @@
 #include "common.h"
 
 MODULE_LICENSE("GPL v2");
-MODULE_DESCRIPTION("Simple NVMe Device Driver");
+MODULE_DESCRIPTION("Generic PCIe Device Driver");
 
 
-#define DEVICE_NAME "nvmet"
-#define NVME_MINORS		(1U << MINORBITS)
+#define DEVICE_NAME "genpci"
+#define genpci_MINORS		(1U << MINORBITS)
 
 #define PROC_NAME "jiffies"
 
@@ -31,10 +31,10 @@ module_param(vectors, uint, 0644);
 MODULE_PARM_DESC(vectors,
 		"interrupt vector num.");
 
-static DEFINE_IDA(nvme_instance_ida);
+static DEFINE_IDA(genpci_instance_ida);
 
-static struct class* nvme_class;
-static dev_t nvme_chr_devt;   
+static struct class* genpci_class;
+static dev_t genpci_chr_devt;   
 
 static int blk_major;
 
@@ -74,7 +74,7 @@ struct dummyblk_entry {
 };
 
 
-struct nvme_dev{
+struct genpci_dev{
     struct pci_dev *pdev;
     struct cdev cdev;
     dev_t  devt;
@@ -96,20 +96,20 @@ struct nvme_dev{
 
 };
 
-static const struct pci_device_id test_nvme_ids[] =
+static const struct pci_device_id genpci_ids[] =
 {
    // { PCI_DEVICE(PCI_VENDOR_ID_TEST, PCI_DEVICE_ID_TEST) },
    { PCI_DEVICE_CLASS(PCI_CLASS_STORAGE_EXPRESS, 0xffffff) },
     { 0, },
 };
 
-MODULE_DEVICE_TABLE(pci, test_nvme_ids);
+MODULE_DEVICE_TABLE(pci, genpci_ids);
 
 
-static int nvmet_pci_open(struct inode* inode, struct file* filp){
-    struct nvme_dev *pnvme_dev =container_of(inode->i_cdev, struct nvme_dev, cdev);
-    filp->private_data = pnvme_dev;
-    pnvme_dev->is_open = 1;
+static int genpci_open(struct inode* inode, struct file* filp){
+    struct genpci_dev *pgenpci_dev =container_of(inode->i_cdev, struct genpci_dev, cdev);
+    filp->private_data = pgenpci_dev;
+    pgenpci_dev->is_open = 1;
     return 0;
 }
 
@@ -117,25 +117,25 @@ static int nvmet_pci_open(struct inode* inode, struct file* filp){
     release resource allocated after probe.
 
 */
-static int nvmet_pci_close(struct inode* inode, struct file* filp){
+static int genpci_close(struct inode* inode, struct file* filp){
     pr_info("%s\n", __func__);
 
-    struct nvme_dev *pnvme_dev = filp->private_data;
+    struct genpci_dev *pgenpci_dev = filp->private_data;
 
     struct dma_entry *dma_list_h;
     struct dma_entry *dma_list_e = NULL;
 
-    if(set_jiffies && jiffies_creater == pnvme_dev ->instance){
+    if(set_jiffies && jiffies_creater == pgenpci_dev ->instance){
         put_page(jiffies_pages[0]);
         kfree(jiffies_pages);
         set_jiffies = false;
     }
     
-    list_for_each_entry_safe(dma_list_h, dma_list_e, &pnvme_dev->memlist, list) {
+    list_for_each_entry_safe(dma_list_h, dma_list_e, &pgenpci_dev->memlist, list) {
         pr_info("safe remove in close\n");
 
         list_del(&dma_list_h->list);
-		dma_free_coherent (&pnvme_dev -> pdev->dev, dma_list_h->size, dma_list_h->virt_addr, dma_list_h->dma_addr);
+		dma_free_coherent (&pgenpci_dev -> pdev->dev, dma_list_h->size, dma_list_h->virt_addr, dma_list_h->dma_addr);
         kfree(dma_list_h);
         
     }
@@ -143,7 +143,7 @@ static int nvmet_pci_close(struct inode* inode, struct file* filp){
     struct signal_entry *single_list_h;
     struct signal_entry *single_list_e = NULL;
 
-    list_for_each_entry_safe(single_list_h, single_list_e, &pnvme_dev->signallist, list) {
+    list_for_each_entry_safe(single_list_h, single_list_e, &pgenpci_dev->signallist, list) {
         list_del(&single_list_h->list);
         free_irq(single_list_h->irq_no, single_list_h -> id);
         eventfd_ctx_put(single_list_h -> trigger);
@@ -155,7 +155,7 @@ static int nvmet_pci_close(struct inode* inode, struct file* filp){
     struct dummyblk_entry *dummyblk_list_h;
     struct dummyblk_entry *dummyblk_list_e = NULL;
 
-    list_for_each_entry_safe(dummyblk_list_h, dummyblk_list_e, &pnvme_dev->dummyblklist, list) {
+    list_for_each_entry_safe(dummyblk_list_h, dummyblk_list_e, &pgenpci_dev->dummyblklist, list) {
         pr_info("%s: remove dummyblk\n", __func__);
         list_del(&dummyblk_list_h->list);
         
@@ -172,39 +172,39 @@ static int nvmet_pci_close(struct inode* inode, struct file* filp){
 #else
 
     for(int i=0; i< NUM_OF_DUMMY_FOR_EACH; ++i){
-        if(pnvme_dev -> dummyblk_entry_p[i].gendisk != NULL){
+        if(pgenpci_dev -> dummyblk_entry_p[i].gendisk != NULL){
             //pr_info("%s: safe remove dummyblk\n", __func__);
-            del_gendisk(pnvme_dev -> dummyblk_entry_p[i].gendisk);
+            del_gendisk(pgenpci_dev -> dummyblk_entry_p[i].gendisk);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,12)
-            blk_put_queue(pnvme_dev -> dummyblk_entry_p[i].gendisk->queue);
+            blk_put_queue(pgenpci_dev -> dummyblk_entry_p[i].gendisk->queue);
 #else 
-            blk_cleanup_queue(pnvme_dev -> dummyblk_entry_p[i].gendisk->queue);
+            blk_cleanup_queue(pgenpci_dev -> dummyblk_entry_p[i].gendisk->queue);
 #endif
-	        put_disk(pnvme_dev -> dummyblk_entry_p[i].gendisk);
+	        put_disk(pgenpci_dev -> dummyblk_entry_p[i].gendisk);
 
             /* This is test code.*/
-            //uint8_t *data = (uint8_t*) page_address(pnvme_dev->dummyblk_entry_p[i].pages[0]);
+            //uint8_t *data = (uint8_t*) page_address(pgenpci_dev->dummyblk_entry_p[i].pages[0]);
             //pr_info("receivce data: %x\n", data[0]);
             //pr_info("receivce data: %x\n", data[1]);
             //pr_info("receivce data: %x\n", data[2]);
 
-            for(int j=0; j< pnvme_dev->dummyblk_entry_p[i].npages; ++j) put_page(pnvme_dev->dummyblk_entry_p[i].pages[j]);
-            kfree(pnvme_dev->dummyblk_entry_p[i].pages);
+            for(int j=0; j< pgenpci_dev->dummyblk_entry_p[i].npages; ++j) put_page(pgenpci_dev->dummyblk_entry_p[i].pages[j]);
+            kfree(pgenpci_dev->dummyblk_entry_p[i].pages);
 
-            pnvme_dev -> dummyblk_entry_p[i].gendisk = NULL;
+            pgenpci_dev -> dummyblk_entry_p[i].gendisk = NULL;
         }
     }
     
 #endif
-    pnvme_dev->is_open = 0;
+    pgenpci_dev->is_open = 0;
     return 0;
 }
 
 int mmap_dma(struct file *filp, struct vm_area_struct *vma)
 {
     int ret = 0;
-    struct nvme_dev *pnvme_dev = filp->private_data;
+    struct genpci_dev *pgenpci_dev = filp->private_data;
 
     dma_addr_t dma_addr; 
     void* virt_addr = NULL;  
@@ -224,7 +224,7 @@ int mmap_dma(struct file *filp, struct vm_area_struct *vma)
 
     pr_info("vma->vm_pgoff: %d\n", vma->vm_pgoff);
 
-    virt_addr = dma_alloc_coherent(&pnvme_dev -> pdev->dev, size, &dma_addr, GFP_KERNEL);
+    virt_addr = dma_alloc_coherent(&pgenpci_dev -> pdev->dev, size, &dma_addr, GFP_KERNEL);
 
     if(IS_ERR_OR_NULL(virt_addr)){
         ret = PTR_ERR(virt_addr);
@@ -237,10 +237,10 @@ int mmap_dma(struct file *filp, struct vm_area_struct *vma)
 
     pr_info("%p, %lx\n", virt_addr, dma_addr);
 
-    list_add(&head->list, &pnvme_dev-> memlist);
+    list_add(&head->list, &pgenpci_dev-> memlist);
 
 	if (vma->vm_pgoff == 0) {
-		ret = dma_mmap_coherent(&pnvme_dev -> pdev->dev, vma, virt_addr, dma_addr, size);
+		ret = dma_mmap_coherent(&pgenpci_dev -> pdev->dev, vma, virt_addr, dma_addr, size);
 	} else
 	{
 		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
@@ -256,7 +256,7 @@ int mmap_dma(struct file *filp, struct vm_area_struct *vma)
     return 0;
 
 out:
-    dma_free_coherent (&pnvme_dev -> pdev->dev, size, virt_addr, dma_addr);
+    dma_free_coherent (&pgenpci_dev -> pdev->dev, size, virt_addr, dma_addr);
 
 out_alloc_data_buffer :
     kfree(head);
@@ -279,13 +279,13 @@ static irqreturn_t msix_irq(int irq, void *arg)
 
 static irqreturn_t intx_irq(int irq, void *arg)
 {
-	struct nvme_dev *pnvme_dev = arg;
+	struct genpci_dev *pgenpci_dev = arg;
 
-	if (pci_check_and_mask_intx(pnvme_dev->pdev)) {
+	if (pci_check_and_mask_intx(pgenpci_dev->pdev)) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,12)
-		eventfd_signal(pnvme_dev->trigger);
+		eventfd_signal(pgenpci_dev->trigger);
 #else
-        eventfd_signal(pnvme_dev->trigger, 1);
+        eventfd_signal(pgenpci_dev->trigger, 1);
 #endif
 		return IRQ_HANDLED;
 	}
@@ -297,7 +297,7 @@ static const struct block_device_operations bops = {
 	.owner		= THIS_MODULE,
 };
 
-int dummyblk_add(int major, struct nvme_dev * pnvme_dev, int number, struct page **pages, long npages)
+int dummyblk_add(int major, struct genpci_dev * pgenpci_dev, int number, struct page **pages, long npages)
 {
 	struct dummyblk_entry *entry = NULL;
 	int ret = 0;
@@ -326,7 +326,7 @@ int dummyblk_add(int major, struct nvme_dev * pnvme_dev, int number, struct page
 
 	gdisk->private_data = entry;
 
-    snprintf(gdisk->disk_name, sizeof( gdisk->disk_name), "ctrl%dn%d", pnvme_dev->instance, number);
+    snprintf(gdisk->disk_name, sizeof( gdisk->disk_name), "ctrl%dn%d", pgenpci_dev->instance, number);
 
 	set_capacity(gdisk, 0);
 
@@ -348,18 +348,18 @@ int dummyblk_add(int major, struct nvme_dev * pnvme_dev, int number, struct page
 #if defined(USE_DUMMYBLK_LIST)
 
     entry->number = number;
-    list_add(&entry->list, &pnvme_dev-> dummyblklist);
+    list_add(&entry->list, &pgenpci_dev-> dummyblklist);
 #else
-    if( pnvme_dev -> dummyblk_entry_p[number].gendisk == NULL){
-        pnvme_dev -> dummyblk_entry_p[number].pages = pages;    
-        pnvme_dev -> dummyblk_entry_p[number].gendisk = gdisk;
-        pnvme_dev -> dummyblk_entry_p[number].npages = npages;    
+    if( pgenpci_dev -> dummyblk_entry_p[number].gendisk == NULL){
+        pgenpci_dev -> dummyblk_entry_p[number].pages = pages;    
+        pgenpci_dev -> dummyblk_entry_p[number].gendisk = gdisk;
+        pgenpci_dev -> dummyblk_entry_p[number].npages = npages;    
     }else {   // alreay set 
         del_gendisk(gdisk);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,12)
-        blk_put_queue(pnvme_dev -> dummyblk_entry_p[number].gendisk->queue);
+        blk_put_queue(pgenpci_dev -> dummyblk_entry_p[number].gendisk->queue);
 #else 
-        blk_cleanup_queue(pnvme_dev -> dummyblk_entry_p[number].gendisk->queue);
+        blk_cleanup_queue(pgenpci_dev -> dummyblk_entry_p[number].gendisk->queue);
 #endif
 	    put_disk(gdisk);
         
@@ -388,9 +388,9 @@ void dummyblk_remove(struct dummyblk_entry *dev)
 	pr_info("simple block device was removed\n");
 }
 
-static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long ioctlparam){
+static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long ioctlparam){
     int ret = 0;
-    struct nvme_dev *pnvme_dev = filp->private_data;
+    struct genpci_dev *pgenpci_dev = filp->private_data;
 
     struct eventfd_ctx *trigger;
     char *name = NULL;
@@ -405,7 +405,7 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
                 return ret;
             }
 
-            name = kasprintf(GFP_KERNEL, KBUILD_MODNAME "[%d](%s)", params.s.vector, pci_name(pnvme_dev->pdev));
+            name = kasprintf(GFP_KERNEL, KBUILD_MODNAME "[%d](%s)", params.s.vector, pci_name(pgenpci_dev->pdev));
 
             if(name == NULL){
                 return -EFAULT;
@@ -420,24 +420,24 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
             
             if(params.s.msix){
                 pr_info("set msix: %s\n",  name);
-                ret = request_irq(pci_irq_vector(pnvme_dev->pdev, params.s.vector), 
+                ret = request_irq(pci_irq_vector(pgenpci_dev->pdev, params.s.vector), 
                                       msix_irq, 
                                       0, 
                                       name, 
                                         trigger
                                       );
             }else{
-                pnvme_dev ->trigger = trigger;    
-                ret = request_irq(pci_irq_vector(pnvme_dev->pdev, 0),
+                pgenpci_dev ->trigger = trigger;    
+                ret = request_irq(pci_irq_vector(pgenpci_dev->pdev, 0),
                                       intx_irq, 
                                       IRQF_SHARED, 
                                       name, 
-                                      pnvme_dev
+                                      pgenpci_dev
                                       );
             }
 
             if (ret) {
-                dev_notice(&pnvme_dev->pdev->dev, "request irq failed: %d\n", ret);
+                dev_notice(&pgenpci_dev->pdev->dev, "request irq failed: %d\n", ret);
                 kfree(name);
                 eventfd_ctx_put(trigger);
                 return ret;
@@ -452,17 +452,17 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
                 return PTR_ERR(head);
             }       
     
-            head ->irq_no = (params.s.msix == true) ? pci_irq_vector(pnvme_dev->pdev, params.s.vector) : pci_irq_vector(pnvme_dev->pdev, 0);
-            head -> id = (params.s.msix == true) ? trigger : pnvme_dev;
+            head ->irq_no = (params.s.msix == true) ? pci_irq_vector(pgenpci_dev->pdev, params.s.vector) : pci_irq_vector(pgenpci_dev->pdev, 0);
+            head -> id = (params.s.msix == true) ? trigger : pgenpci_dev;
             head -> trigger = trigger;
 
-            list_add(&head->list, &pnvme_dev-> signallist);
+            list_add(&head->list, &pgenpci_dev-> signallist);
             pr_info("ioctl done\n");
 
             break;
         
         case IOCTL_GET_MEMFINFO:
-            ptr = list_entry(pnvme_dev->memlist.next, struct dma_entry, list);
+            ptr = list_entry(pgenpci_dev->memlist.next, struct dma_entry, list);
 
             //pr_info("ioctl : %p\n", ptr ->virt_addr);
             //pr_info("virtual address2: %lx", (uint32_t)ptr ->virt_addr);
@@ -480,10 +480,10 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
             break;
 
         case IOCTL_GET_BDF:
-            params.b.domain = pci_domain_nr(pnvme_dev->pdev->bus);
-            params.b.bus = pnvme_dev->pdev->bus->number;
-            params.b.dev = PCI_SLOT(pnvme_dev->pdev->devfn);
-            params.b.func = PCI_FUNC(pnvme_dev->pdev->devfn);    
+            params.b.domain = pci_domain_nr(pgenpci_dev->pdev->bus);
+            params.b.bus = pgenpci_dev->pdev->bus->number;
+            params.b.dev = PCI_SLOT(pgenpci_dev->pdev->devfn);
+            params.b.func = PCI_FUNC(pgenpci_dev->pdev->devfn);    
 
             if (copy_to_user((void __user *)ioctlparam, &params, sizeof(struct test_params))) {
 			    ret =  -EFAULT;
@@ -502,11 +502,11 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
             struct dma_entry *dma_list_h;
             struct dma_entry *dma_list_e = NULL;
                 
-            list_for_each_entry_safe(dma_list_h, dma_list_e, &pnvme_dev->memlist, list) {
+            list_for_each_entry_safe(dma_list_h, dma_list_e, &pgenpci_dev->memlist, list) {
                 if((uint64_t)dma_list_h->virt_addr == params.m.kernel_virtaddr && dma_list_h->dma_addr == params.m.dma_addr){
                     pr_info("safe remove in ioctl\n");
                     list_del(&dma_list_h->list);
-		            dma_free_coherent (&pnvme_dev -> pdev->dev, dma_list_h->size, dma_list_h->virt_addr, dma_list_h->dma_addr);
+		            dma_free_coherent (&pgenpci_dev -> pdev->dev, dma_list_h->size, dma_list_h->virt_addr, dma_list_h->dma_addr);
                     kfree(dma_list_h);
                     break;
                 }
@@ -567,7 +567,7 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
             up_read(&current->mm->mmap_sem);
 #endif
 
-            dummyblk_add(blk_major, pnvme_dev, params.d.number, pages, npages);
+            dummyblk_add(blk_major, pgenpci_dev, params.d.number, pages, npages);
 
             break;
 
@@ -577,7 +577,7 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
             
 #else 
             part_stat_lock();
-            //part_stat_inc(&pnvme_dev->dummyblklist[0], ios[0]);
+            //part_stat_inc(&pgenpci_dev->dummyblklist[0], ios[0]);
 
 
 
@@ -630,7 +630,7 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
 
 #endif
             set_jiffies = true;
-            jiffies_creater = pnvme_dev ->instance;
+            jiffies_creater = pgenpci_dev ->instance;
 
             break;
 
@@ -650,9 +650,7 @@ static long nvme_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long i
             if (copy_to_user((void __user *)ioctlparam, &params, sizeof(struct test_params))) {
 			    ret =  -EFAULT;
 		    }
-
             break;
-
     }
 
     return ret;
@@ -684,48 +682,48 @@ static const struct file_operations proc_ops = {
 };
 #endif
 
-static const struct file_operations nvme_chr_fops = {
+static const struct file_operations genpci_chr_fops = {
     .owner          = THIS_MODULE,
-    .open           = nvmet_pci_open,
-    .release        = nvmet_pci_close,
-    .unlocked_ioctl = nvme_ioctl,
+    .open           = genpci_open,
+    .release        = genpci_close,
+    .unlocked_ioctl = genpci_ioctl,
     .mmap           = mmap_dma,
 };
 
-static int nvmet_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id){
+static int genpci_probe(struct pci_dev *pdev, const struct pci_device_id *id){
 
     int ret = 0;
-    struct nvme_dev *pnvme_dev;
+    struct genpci_dev *pgenpci_dev;
     int n;
    
-    pnvme_dev = kmalloc(sizeof(struct nvme_dev), GFP_KERNEL);
-    if(!pnvme_dev){
+    pgenpci_dev = kmalloc(sizeof(struct genpci_dev), GFP_KERNEL);
+    if(!pgenpci_dev){
         ret = -ENOMEM;
-        goto out_alloc_pnvme_dev;
+        goto out_alloc_pgenpci_dev;
     }
 
-    ret = ida_simple_get(&nvme_instance_ida, 0, 0, GFP_KERNEL);
+    ret = ida_simple_get(&genpci_instance_ida, 0, 0, GFP_KERNEL);
     if (ret < 0){
         ret = -ENODEV;
         goto out_ida_simple_get;
     }
 		
-    pnvme_dev -> instance = ret;
+    pgenpci_dev -> instance = ret;
 
-    pnvme_dev -> devt = MKDEV(MAJOR(nvme_chr_devt), pnvme_dev -> instance);
+    pgenpci_dev -> devt = MKDEV(MAJOR(genpci_chr_devt), pgenpci_dev -> instance);
 
-    cdev_init(&pnvme_dev->cdev, &nvme_chr_fops);
-    pnvme_dev->cdev.owner = THIS_MODULE;
+    cdev_init(&pgenpci_dev->cdev, &genpci_chr_fops);
+    pgenpci_dev->cdev.owner = THIS_MODULE;
 
-    if ((ret = cdev_add(&pnvme_dev->cdev, pnvme_dev -> devt , NVME_MINORS)) != 0) {
+    if ((ret = cdev_add(&pgenpci_dev->cdev, pgenpci_dev -> devt , genpci_MINORS)) != 0) {
         goto out_cdev_add;
     }
 
-    pnvme_dev -> sysdev = device_create(nvme_class, NULL, MKDEV(MAJOR(nvme_chr_devt), pnvme_dev -> instance), NULL, "nvmet%d", pnvme_dev -> instance);
+    pgenpci_dev -> sysdev = device_create(genpci_class, NULL, MKDEV(MAJOR(genpci_chr_devt), pgenpci_dev -> instance), NULL, "genpci%d", pgenpci_dev -> instance);
     
-    if (IS_ERR( pnvme_dev -> sysdev)) {
+    if (IS_ERR( pgenpci_dev -> sysdev)) {
 		pr_err("couldn't create dev\n");
-		ret = PTR_ERR( pnvme_dev -> sysdev);
+		ret = PTR_ERR( pgenpci_dev -> sysdev);
 		goto out_device_create;
 	}
 
@@ -744,8 +742,8 @@ static int nvmet_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         goto out_pci_request_regions;
     }
 
-    pnvme_dev->pdev = pci_dev_get(pdev);
-	pci_set_drvdata(pdev, pnvme_dev);
+    pgenpci_dev->pdev = pci_dev_get(pdev);
+	pci_set_drvdata(pdev, pgenpci_dev);
 
     n = pci_alloc_irq_vectors(pdev, 1, vectors, PCI_IRQ_ALL_TYPES | PCI_IRQ_AFFINITY);
 
@@ -756,22 +754,22 @@ static int nvmet_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         goto out_pci_alloc_irq_vectors;
 	}
 
-    INIT_LIST_HEAD(&pnvme_dev->memlist);   
-    INIT_LIST_HEAD(&pnvme_dev->signallist);   
+    INIT_LIST_HEAD(&pgenpci_dev->memlist);   
+    INIT_LIST_HEAD(&pgenpci_dev->signallist);   
 
 #if defined(USE_DUMMYBLK_LIST)
 
-    INIT_LIST_HEAD(&pnvme_dev->dummyblklist);
+    INIT_LIST_HEAD(&pgenpci_dev->dummyblklist);
 #else
-    pnvme_dev-> dummyblk_entry_p = kzalloc(sizeof(struct dummyblk_entry) * NUM_OF_DUMMY_FOR_EACH, GFP_KERNEL);
+    pgenpci_dev-> dummyblk_entry_p = kzalloc(sizeof(struct dummyblk_entry) * NUM_OF_DUMMY_FOR_EACH, GFP_KERNEL);
             
-    if(IS_ERR_OR_NULL(pnvme_dev->dummyblk_entry_p)){
-        ret = PTR_ERR(pnvme_dev->dummyblk_entry_p);
+    if(IS_ERR_OR_NULL(pgenpci_dev->dummyblk_entry_p)){
+        ret = PTR_ERR(pgenpci_dev->dummyblk_entry_p);
         goto out_kzalloc;
     }       
 
     for(int i=0; i< NUM_OF_DUMMY_FOR_EACH; ++i){
-        pnvme_dev -> dummyblk_entry_p[i].gendisk = NULL;
+        pgenpci_dev -> dummyblk_entry_p[i].gendisk = NULL;
     }
 #endif
     return ret;
@@ -791,34 +789,34 @@ out_dma_set_mask_and_coherent:
     pci_disable_device(pdev);
 
 out_pci_enable_device:
-    device_destroy(nvme_class, pnvme_dev -> devt );
+    device_destroy(genpci_class, pgenpci_dev -> devt );
 
 out_device_create:
-    cdev_del(&pnvme_dev->cdev); 
+    cdev_del(&pgenpci_dev->cdev); 
 
 out_cdev_add:
-    ida_simple_remove(&nvme_instance_ida, pnvme_dev -> instance );
+    ida_simple_remove(&genpci_instance_ida, pgenpci_dev -> instance );
 
 out_ida_simple_get:
-    kfree(pnvme_dev);
+    kfree(pgenpci_dev);
 
-out_alloc_pnvme_dev:
+out_alloc_pgenpci_dev:
 
     return ret;
 }
 
-static void nvmet_pci_remove(struct pci_dev* pdev){
+static void genpci_remove(struct pci_dev* pdev){
     pr_info("%s\n", __func__);
 
-    struct nvme_dev *pnvme_dev = pci_get_drvdata(pdev);
-    pnvme_dev->is_open = 0;
+    struct genpci_dev *pgenpci_dev = pci_get_drvdata(pdev);
+    pgenpci_dev->is_open = 0;
 
 #if defined(USE_DUMMYBLK_LIST)
 
     struct dummyblk_entry *dummyblk_list_h;
     struct dummyblk_entry *dummyblk_list_e = NULL;
 
-    list_for_each_entry_safe(dummyblk_list_h, dummyblk_list_e, &pnvme_dev->dummyblklist, list) {
+    list_for_each_entry_safe(dummyblk_list_h, dummyblk_list_e, &pgenpci_dev->dummyblklist, list) {
         pr_info("%s: dummyblk\n", __func__);
         list_del(&dummyblk_list_h->list);
         
@@ -834,34 +832,34 @@ static void nvmet_pci_remove(struct pci_dev* pdev){
     }
 #else
     for(int i=0; i< NUM_OF_DUMMY_FOR_EACH; ++i){
-        if(pnvme_dev -> dummyblk_entry_p[i].gendisk != NULL){
+        if(pgenpci_dev -> dummyblk_entry_p[i].gendisk != NULL){
             //pr_info("%s: safe remove dummyblk\n", __func__);
-            del_gendisk(pnvme_dev -> dummyblk_entry_p[i].gendisk);
+            del_gendisk(pgenpci_dev -> dummyblk_entry_p[i].gendisk);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,12)
-            blk_put_queue(pnvme_dev -> dummyblk_entry_p[i].gendisk->queue);
+            blk_put_queue(pgenpci_dev -> dummyblk_entry_p[i].gendisk->queue);
 #else 
-            blk_cleanup_queue(pnvme_dev -> dummyblk_entry_p[i].gendisk->queue);
+            blk_cleanup_queue(pgenpci_dev -> dummyblk_entry_p[i].gendisk->queue);
 #endif
-	        put_disk(pnvme_dev -> dummyblk_entry_p[i].gendisk);
+	        put_disk(pgenpci_dev -> dummyblk_entry_p[i].gendisk);
         
-            for(int j=0; j< pnvme_dev->dummyblk_entry_p[i].npages; ++j) put_page(pnvme_dev->dummyblk_entry_p[i].pages[j]);
-            kfree(pnvme_dev->dummyblk_entry_p[i].pages);
-            pnvme_dev -> dummyblk_entry_p[i].gendisk = NULL;
+            for(int j=0; j< pgenpci_dev->dummyblk_entry_p[i].npages; ++j) put_page(pgenpci_dev->dummyblk_entry_p[i].pages[j]);
+            kfree(pgenpci_dev->dummyblk_entry_p[i].pages);
+            pgenpci_dev -> dummyblk_entry_p[i].gendisk = NULL;
         }
     }
 
-    kfree( pnvme_dev->dummyblk_entry_p);
+    kfree( pgenpci_dev->dummyblk_entry_p);
 
 #endif
 
     struct dma_entry *dma_list_h;
     struct dma_entry *dma_list_e = NULL;
 
-    list_for_each_entry_safe(dma_list_h, dma_list_e, &pnvme_dev->memlist, list) {
+    list_for_each_entry_safe(dma_list_h, dma_list_e, &pgenpci_dev->memlist, list) {
         pr_info("%s: remove dma memory\n", __func__);
 
         list_del(&dma_list_h->list);
-		dma_free_coherent (&pnvme_dev -> pdev->dev, dma_list_h->size, dma_list_h->virt_addr, dma_list_h->dma_addr);
+		dma_free_coherent (&pgenpci_dev -> pdev->dev, dma_list_h->size, dma_list_h->virt_addr, dma_list_h->dma_addr);
         kfree(dma_list_h);
         
     }
@@ -869,82 +867,82 @@ static void nvmet_pci_remove(struct pci_dev* pdev){
     struct signal_entry *single_list_h;
     struct signal_entry *single_list_e = NULL;
 
-    list_for_each_entry_safe(single_list_h, single_list_e, &pnvme_dev->signallist, list) {
+    list_for_each_entry_safe(single_list_h, single_list_e, &pgenpci_dev->signallist, list) {
         list_del(&single_list_h->list);
         free_irq(single_list_h->irq_no , single_list_h->id);
         eventfd_ctx_put(single_list_h -> trigger);
         kfree(single_list_h);        
     }
 
-    pci_free_irq_vectors(pnvme_dev->pdev);
+    pci_free_irq_vectors(pgenpci_dev->pdev);
     pci_set_drvdata(pdev, NULL);
 	pci_release_regions(pdev);
     pci_disable_device(pdev);
 
-    device_destroy(nvme_class, pnvme_dev->devt );
-    cdev_del(&pnvme_dev->cdev); 
-    ida_simple_remove(&nvme_instance_ida, pnvme_dev->instance );
-    kfree(pnvme_dev);
+    device_destroy(genpci_class, pgenpci_dev->devt );
+    cdev_del(&pgenpci_dev->cdev); 
+    ida_simple_remove(&genpci_instance_ida, pgenpci_dev->instance );
+    kfree(pgenpci_dev);
 
 }
 
-static void nvme_shutdown(struct pci_dev *pdev)
+static void genpci_shutdown(struct pci_dev *pdev)
 {
 
 }
 
-static struct pci_driver simple_nvme_driver = {
+static struct pci_driver genpci_driver = {
     .name = DEVICE_NAME,
-    .id_table = test_nvme_ids,
-    .probe = nvmet_pci_probe,
-    .remove = nvmet_pci_remove,
-    .shutdown = nvme_shutdown,
+    .id_table = genpci_ids,
+    .probe = genpci_probe,
+    .remove = genpci_remove,
+    .shutdown = genpci_shutdown,
 };
 
-static int nvmet_init(void) {
+static int genpci_init(void) {
     int ret;
     pr_info("%s\n", __func__);
 
-    ida_init(&nvme_instance_ida);
+    ida_init(&genpci_instance_ida);
 
-	ret = alloc_chrdev_region(&nvme_chr_devt, 0, NVME_MINORS, DEVICE_NAME);
+	ret = alloc_chrdev_region(&genpci_chr_devt, 0, genpci_MINORS, DEVICE_NAME);
 	if (ret != 0){
         printk(KERN_ERR "%d: %s()   %d",__LINE__, __FUNCTION__, ret ); 
-        ida_destroy(&nvme_instance_ida);
+        ida_destroy(&genpci_instance_ida);
         return ret;
     }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,4,0)
-    nvme_class = class_create(DEVICE_NAME);
+    genpci_class = class_create(DEVICE_NAME);
 #else
-	nvme_class = class_create(THIS_MODULE, DEVICE_NAME);
+	genpci_class = class_create(THIS_MODULE, DEVICE_NAME);
 #endif
 
-	if (IS_ERR(nvme_class)) {
-		ret = PTR_ERR(nvme_class);
-        unregister_chrdev_region(nvme_chr_devt, NVME_MINORS);
-        ida_destroy(&nvme_instance_ida);
+	if (IS_ERR(genpci_class)) {
+		ret = PTR_ERR(genpci_class);
+        unregister_chrdev_region(genpci_chr_devt, genpci_MINORS);
+        ida_destroy(&genpci_instance_ida);
 		return ret;
 	}
 
     blk_major = register_blkdev(0, "dummyblk");
 
     if (blk_major < 0) {
-        class_destroy(nvme_class);
-        unregister_chrdev_region(nvme_chr_devt, NVME_MINORS);
-        ida_destroy(&nvme_instance_ida);
+        class_destroy(genpci_class);
+        unregister_chrdev_region(genpci_chr_devt, genpci_MINORS);
+        ida_destroy(&genpci_instance_ida);
 
 		return blk_major;
 	}
 
-    ret = pci_register_driver(&simple_nvme_driver); 
+    ret = pci_register_driver(&genpci_driver); 
     if(ret != 0){
         pr_err("%d: %s()   %d",__LINE__, __FUNCTION__, ret );     
         unregister_blkdev(blk_major, "dummyblk");
 
-        class_destroy(nvme_class);
-        unregister_chrdev_region(nvme_chr_devt, NVME_MINORS);
-        ida_destroy(&nvme_instance_ida);
+        class_destroy(genpci_class);
+        unregister_chrdev_region(genpci_chr_devt, genpci_MINORS);
+        ida_destroy(&genpci_instance_ida);
 
         return ret;
     }
@@ -953,30 +951,30 @@ static int nvmet_init(void) {
 	//if (!entry ) {
 	//	pr_err("proc_create\n");
 
-    //  pci_unregister_driver(&simple_nvme_driver);
+    //  pci_unregister_driver(&genpci_driver);
     //  unregister_blkdev(blk_major, "dummyblk");
-    //  class_destroy(nvme_class);
-    //  unregister_chrdev_region(nvme_chr_devt, NVME_MINORS);
-    //  ida_destroy(&nvme_instance_ida);
+    //  class_destroy(genpci_class);
+    //  unregister_chrdev_region(genpci_chr_devt, genpci_MINORS);
+    //  ida_destroy(&genpci_instance_ida);
 	//	return -ENOENT;
 	//}
 
     return ret; 
 }
 
-static void nvmet_exit(void) {
+static void genpci_exit(void) {
 
     pr_info("%s\n", __func__);
 
     //remove_proc_entry(PROC_NAME, NULL);
-    pci_unregister_driver(&simple_nvme_driver);  //ドライバー名、table, コールバック関数(probe, remove)を削除  
+    pci_unregister_driver(&genpci_driver);  //ドライバー名、table, コールバック関数(probe, remove)を削除  
 
     unregister_blkdev(blk_major, "dummyblk");
 
-    class_destroy(nvme_class);
-    unregister_chrdev_region(nvme_chr_devt, NVME_MINORS);
-    ida_destroy(&nvme_instance_ida);
+    class_destroy(genpci_class);
+    unregister_chrdev_region(genpci_chr_devt, genpci_MINORS);
+    ida_destroy(&genpci_instance_ida);
 }
 
-module_init(nvmet_init);
-module_exit(nvmet_exit);
+module_init(genpci_init);
+module_exit(genpci_exit);

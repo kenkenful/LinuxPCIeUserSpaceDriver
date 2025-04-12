@@ -21,11 +21,13 @@ int main(void)
 
 	int len = NPAGES * getpagesize();
 
-	if ((fd=open("/dev/nvmet0", O_RDWR|O_SYNC)) < 0) {
+	if ((fd=open("/dev/genpci0", O_RDWR|O_SYNC)) < 0) {
 		perror("open");
 		exit(-1);
 	}
-	fprintf(stderr, "mmap_alloc: open OK\n");
+
+	int 	rc = ioctl(fd, IOCTL_GET_BDF, &param);
+	printf("%x:%x.%x\n", param.b.bus, param.b.dev, param.b.func);
 
 	kadr = (unsigned int *)mmap(0, len, PROT_READ|PROT_WRITE, MAP_SHARED| MAP_LOCKED,fd, 0);
 
@@ -35,11 +37,13 @@ int main(void)
 	}
 	fprintf(stderr, "mmap_alloc: mmap OK\n");
 
-	int rc = ioctl(fd, IOCTL_GET_MEMFINFO, &param);
+	rc = ioctl(fd, IOCTL_GET_MEMFINFO, &param);
 
 	printf("kernel virt addr: %p, %lx\n", param.m.kernel_virtaddr, param.m.dma_addr);
 
 	rc = ioctl(fd, IOCTL_RELEASE_MEM, &param);
+
+
 
 #if 0
 	void *p;
@@ -79,8 +83,7 @@ int main(void)
 
 //	sleep(10);
 
-	rc = ioctl(fd, IOCTL_GET_BDF, &param);
-	printf("%x:%x.%x\n", param.b.bus, param.b.dev, param.b.func);
+	
 
 	kadr = (unsigned int *)mmap(0, len, PROT_READ|PROT_WRITE, MAP_SHARED| MAP_LOCKED,fd, 0);
 
