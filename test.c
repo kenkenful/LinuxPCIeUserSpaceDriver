@@ -26,7 +26,7 @@ MODULE_DESCRIPTION("Generic PCIe Device Driver");
 #undef USE_DUMMYBLK_LIST  /* This define is not complete, and already not mentenance. */
 #define NUM_OF_DUMMY_FOR_EACH    (128)
 
-static unsigned int vectors = 16;
+static unsigned int vectors = 32;
 module_param(vectors, uint, 0644);
 MODULE_PARM_DESC(vectors,
 		"interrupt vector num.");
@@ -38,13 +38,8 @@ static dev_t genpci_chr_devt;
 
 static int blk_major;
 
-
 #define PCI_VENDOR_ID_TEST 0x144d
 #define PCI_DEVICE_ID_TEST 0xa808
-
-int jiffies_creater;
-bool set_jiffies = false;
-struct page **jiffies_pages;
 
 struct dma_entry {
     struct list_head list;
@@ -54,12 +49,12 @@ struct dma_entry {
 };
 
 struct signal_entry{
+    char* irqname;
     struct list_head list;
     int irq_no;
     void* id;
     struct eventfd_ctx   *trigger;  
 };
-
 
 struct dummyblk_entry {
 
@@ -72,7 +67,6 @@ struct dummyblk_entry {
 
     struct gendisk *gendisk;
 };
-
 
 struct genpci_dev{
     struct pci_dev *pdev;
@@ -87,6 +81,7 @@ struct genpci_dev{
     struct list_head signallist;
 
     struct eventfd_ctx   *trigger;   /* use when INT-X */
+    int    num_irq_vector;
 
 #if defined(USE_DUMMYBLK_LIST)
     struct list_head dummyblklist;
@@ -94,6 +89,8 @@ struct genpci_dev{
     struct dummyblk_entry *dummyblk_entry_p;
 #endif
 
+    bool set_jiffies ;
+    struct page **jiffies_pages;
 };
 
 static const struct pci_device_id genpci_ids[] =
@@ -115,7 +112,6 @@ static int genpci_open(struct inode* inode, struct file* filp){
 
 /*
     release resource allocated after probe.
-
 */
 static int genpci_close(struct inode* inode, struct file* filp){
     pr_info("%s\n", __func__);
@@ -125,10 +121,10 @@ static int genpci_close(struct inode* inode, struct file* filp){
     struct dma_entry *dma_list_h;
     struct dma_entry *dma_list_e = NULL;
 
-    if(set_jiffies && jiffies_creater == pgenpci_dev ->instance){
-        put_page(jiffies_pages[0]);
-        kfree(jiffies_pages);
-        set_jiffies = false;
+    if(pgenpci_dev -> set_jiffies == true){
+        put_page(pgenpci_dev -> jiffies_pages[0]);
+        kfree(pgenpci_dev -> jiffies_pages);
+        pgenpci_dev -> set_jiffies = false;
     }
     
     list_for_each_entry_safe(dma_list_h, dma_list_e, &pgenpci_dev->memlist, list) {
@@ -137,7 +133,6 @@ static int genpci_close(struct inode* inode, struct file* filp){
         list_del(&dma_list_h->list);
 		dma_free_coherent (&pgenpci_dev -> pdev->dev, dma_list_h->size, dma_list_h->virt_addr, dma_list_h->dma_addr);
         kfree(dma_list_h);
-        
     }
 
     struct signal_entry *singnal_list_h;
@@ -148,9 +143,12 @@ static int genpci_close(struct inode* inode, struct file* filp){
         list_del(&singnal_list_h->list);
         free_irq(singnal_list_h->irq_no, singnal_list_h -> id);
         eventfd_ctx_put(singnal_list_h -> trigger);
+        kfree(singnal_list_h->irqname);
+                
         kfree(singnal_list_h);
-        
     }
+
+    pci_free_irq_vectors(pgenpci_dev->pdev);
 
 #if defined(USE_DUMMYBLK_LIST)
     struct dummyblk_entry *dummyblk_list_h;
@@ -327,7 +325,7 @@ int dummyblk_add(int major, struct genpci_dev * pgenpci_dev, int number, struct 
 
 	gdisk->private_data = entry;
 
-    snprintf(gdisk->disk_name, sizeof( gdisk->disk_name), "ctrl%dn%d", pgenpci_dev->instance, number);
+    snprintf(gdisk->disk_name, sizeof( gdisk->disk_name), "dmmyblk%dn%d", pgenpci_dev->instance, number);
 
 	set_capacity(gdisk, 0);
 
@@ -355,7 +353,8 @@ int dummyblk_add(int major, struct genpci_dev * pgenpci_dev, int number, struct 
         pgenpci_dev -> dummyblk_entry_p[number].pages = pages;    
         pgenpci_dev -> dummyblk_entry_p[number].gendisk = gdisk;
         pgenpci_dev -> dummyblk_entry_p[number].npages = npages;    
-    }else {   // alreay set 
+    }else {    
+        pr_err("dummyblk is already set.\n");
         del_gendisk(gdisk);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,12)
         blk_put_queue(pgenpci_dev -> dummyblk_entry_p[number].gendisk->queue);
@@ -394,11 +393,8 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
     struct genpci_dev *pgenpci_dev = filp->private_data;
 
     struct eventfd_ctx *trigger;
-   // char *name = NULL;
-
     struct dma_entry *ptr;
     struct test_params params = {0};
-   // int irq_no;
 
     switch(ioctlnum){
         case IOCTL_SET_SIGNAL:
@@ -406,58 +402,136 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
                 return ret;
             }
 
-            //name = kasprintf(GFP_KERNEL, KBUILD_MODNAME "%d.%d", pgenpci_dev->instance, params.s.vector);
-            //pr_info("%s\n", name);
-            //if(name == NULL){
-            //    return -EFAULT;
-            // }
+            struct signal_entry *singnal_list_h;
+            struct signal_entry *singnal_list_e = NULL;
 
-            trigger = eventfd_ctx_fdget(params.s.fd);
-	        if (IS_ERR(trigger)) {
-                printk(KERN_ERR "trigger");
-            //    kfree(name);
-                return -EFAULT;
-	        }    
-            
-            if(params.s.msix){
-            //    pr_info("set msix: %s\n",  name);
-                ret = request_irq(pci_irq_vector(pgenpci_dev->pdev, params.s.vector), 
-                                      msix_irq, 
-                                      0, 
-                                      params.s.name, 
+            list_for_each_entry_safe(singnal_list_h, singnal_list_e, &pgenpci_dev->signallist, list) {
+                list_del(&singnal_list_h->list);
+                free_irq(singnal_list_h->irq_no, singnal_list_h -> id);
+                eventfd_ctx_put(singnal_list_h -> trigger);
+                kfree(singnal_list_h->irqname);
+                kfree(singnal_list_h);
+
+            }
+
+            pci_free_irq_vectors(pgenpci_dev->pdev);
+
+            if(params.s.irq_mode == MSIX){
+               
+                pgenpci_dev-> num_irq_vector = pci_alloc_irq_vectors( pgenpci_dev-> pdev, 1, vectors, PCI_IRQ_MSIX | PCI_IRQ_AFFINITY);
+                pr_info("msix vector num: %d\n",  pgenpci_dev-> num_irq_vector );
+                if ( pgenpci_dev-> num_irq_vector  < 0) {
+                    pgenpci_dev-> num_irq_vector = 0;
+                    return -ENOMEM;
+	            }
+               
+                int num = (params.s.vectornum > pgenpci_dev-> num_irq_vector) ? pgenpci_dev-> num_irq_vector : params.s.vectornum;
+
+                for(int i=0; i< num; ++i){
+
+                    struct signal_entry *head = kzalloc(sizeof(struct signal_entry), GFP_KERNEL);
+
+                    if(IS_ERR_OR_NULL(head)){
+                        return PTR_ERR(head);
+                    }       
+
+                    //head->irqname = kasprintf(GFP_KERNEL, KBUILD_MODNAME "[%d](%s)", i, pci_name(pgenpci_dev->pdev));
+                    head->irqname = kasprintf(GFP_KERNEL, "genpci%d.%d", pgenpci_dev ->instance, i);
+                    pr_info("%s\n",  head->irqname);
+                    if(!head->irqname){
+                        kfree(head);
+                        return -EFAULT;
+                    }
+
+                    trigger = eventfd_ctx_fdget(params.s.fd[i]);
+	                if (IS_ERR(trigger)){
+                        pr_err("Failed to create trigger\n");
+                        kfree(head->irqname);
+                        kfree(head);
+                        return -EFAULT;
+	                }    
+
+                    ret = request_irq(pci_irq_vector(pgenpci_dev->pdev, i), 
+                                        msix_irq, 
+                                        0, 
+                                        head->irqname, 
                                         trigger
                                       );
-            }else{
-                pgenpci_dev ->trigger = trigger;    
-                ret = request_irq(pci_irq_vector(pgenpci_dev->pdev, 0),
-                                      intx_irq, 
-                                      IRQF_SHARED, 
-                                      params.s.name, 
-                                      pgenpci_dev
-                                      );
+
+                    if (ret) {
+                        dev_notice(&pgenpci_dev->pdev->dev, "request irq failed: %d\n", ret);
+                        eventfd_ctx_put(trigger);
+                        kfree(head->irqname);
+                        kfree(head);
+                        return ret;
+                    }
+                  
+                    head -> irq_no =  pci_irq_vector(pgenpci_dev->pdev, i);
+                    head -> id = trigger;
+                    head -> trigger = trigger;
+
+                    list_add(&head->list, &pgenpci_dev-> signallist);
+
+                }
+
+            }else if(params.s.irq_mode == INTX){
+               
+                pgenpci_dev-> num_irq_vector = pci_alloc_irq_vectors( pgenpci_dev-> pdev, 1, vectors, PCI_IRQ_INTX | PCI_IRQ_AFFINITY);
+                pr_info("intx vector num: %d\n",  pgenpci_dev-> num_irq_vector );
+                if ( pgenpci_dev-> num_irq_vector < 0) {
+                    pgenpci_dev-> num_irq_vector = 0;
+                    return -ENOMEM;
+                }
+                
+                int num = (params.s.vectornum > pgenpci_dev-> num_irq_vector) ? pgenpci_dev-> num_irq_vector : params.s.vectornum;
+
+                for(int i=0; i< num; ++i){
+                    struct signal_entry *head = kzalloc(sizeof(struct signal_entry), GFP_KERNEL);
+
+                    if(IS_ERR_OR_NULL(head)){
+                        return PTR_ERR(head);
+                    }       
+
+                    //head->irqname = kasprintf(GFP_KERNEL, KBUILD_MODNAME "[%d](%s)", i, pci_name(pgenpci_dev->pdev));
+                    head->irqname = kasprintf(GFP_KERNEL, "genpci%d.%d", pgenpci_dev ->instance  , i);
+                    pr_info("%s\n",  head->irqname);
+                    if(!head->irqname){
+                        kfree(head);
+                        return -EFAULT;
+                    }
+
+                    trigger = eventfd_ctx_fdget(params.s.fd[i]);
+	                if (IS_ERR(trigger)){
+                        pr_err("Failed to create trigger\n");
+                        kfree(head->irqname);
+                        kfree(head);
+                        return -EFAULT;
+	                }    
+
+                    pgenpci_dev ->trigger = trigger;    
+                    ret = request_irq(pci_irq_vector(pgenpci_dev->pdev, i),
+                                        intx_irq, 
+                                        IRQF_SHARED, 
+                                        head->irqname, 
+                                        pgenpci_dev
+                                        );
+
+                    if (ret) {
+                        dev_notice(&pgenpci_dev->pdev->dev, "request irq failed: %d\n", ret);
+                        eventfd_ctx_put(trigger);
+                        kfree(head->irqname);
+                        kfree(head);
+                        return ret;
+                    }
+
+                    head -> irq_no = pci_irq_vector(pgenpci_dev->pdev, i);
+                    head -> id = pgenpci_dev;
+                    head -> trigger = trigger;
+
+                    list_add(&head->list, &pgenpci_dev-> signallist);
+                }
             }
 
-            if (ret) {
-                dev_notice(&pgenpci_dev->pdev->dev, "request irq failed: %d\n", ret);
-            //    kfree(name);
-                eventfd_ctx_put(trigger);
-                return ret;
-            }
-
-           // kfree(name);
-
-            struct signal_entry *head = kzalloc(sizeof(struct signal_entry), GFP_KERNEL);
-            
-            if(IS_ERR_OR_NULL(head)){
-                eventfd_ctx_put(trigger);
-                return PTR_ERR(head);
-            }       
-    
-            head ->irq_no = (params.s.msix == true) ? pci_irq_vector(pgenpci_dev->pdev, params.s.vector) : pci_irq_vector(pgenpci_dev->pdev, 0);
-            head -> id = (params.s.msix == true) ? trigger : pgenpci_dev;
-            head -> trigger = trigger;
-
-            list_add(&head->list, &pgenpci_dev-> signallist);
             pr_info("ioctl done\n");
 
             break;
@@ -589,18 +663,18 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
             break;
 
         case IOCTL_SETUP_JIFFIES:
-            if(set_jiffies) return -EEXIST;
+            if(pgenpci_dev -> set_jiffies == true) return -EEXIST;
 
             if(copy_from_user(&params, (void  __user*)ioctlparam, sizeof(struct test_params))){
                 return -EFAULT;
             }
-#if 1
+
             unsigned long jiffies_data = (unsigned long)params.j.buf;
             
             long jiffies_npages = 0;
             unsigned long jiffies_npages_req = 1;
 
-            if ((jiffies_pages =  (struct page**) kvcalloc(jiffies_npages_req, sizeof(struct pages*), GFP_KERNEL)) == NULL){
+            if ((pgenpci_dev -> jiffies_pages =  (struct page**) kvcalloc(jiffies_npages_req, sizeof(struct pages*), GFP_KERNEL)) == NULL){
                 pr_err("could not allocate memory for pages array\n");
                 return -ENOMEM;
             }
@@ -612,14 +686,14 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0)
-            jiffies_npages = get_user_pages(jiffies_data, jiffies_npages_req, FOLL_WRITE , jiffies_pages);
+            jiffies_npages = get_user_pages(jiffies_data, jiffies_npages_req, FOLL_WRITE , pgenpci_dev -> jiffies_pages);
 #else 
-            jiffies_npages = get_user_pages(jiffies_data, jiffies_npages_req, FOLL_WRITE , jiffies_pages, NULL);
+            jiffies_npages = get_user_pages(jiffies_data, jiffies_npages_req, FOLL_WRITE , pgenpci_dev -> jiffies_pages, NULL);
 #endif
 
             if (jiffies_npages <= 0){
                 pr_err("unable to pin any pages in memory\n");
-                kfree(jiffies_pages);
+                kfree(pgenpci_dev -> jiffies_pages);
                 return -ENOMEM;
             }
 
@@ -629,16 +703,13 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
             up_read(&current->mm->mmap_sem);
 #endif
 
-#endif
-            set_jiffies = true;
-            jiffies_creater = pgenpci_dev ->instance;
+            pgenpci_dev -> set_jiffies = true;
 
             break;
 
         case IOCTL_GET_JIFFIES:
-            *(unsigned long*)page_address(jiffies_pages[0]) = jiffies;
-            pr_info("jiffies virt addr: %lx\n",&jiffies);
-            pr_info("jiffies phys addr: %lx\n",virt_to_phys(&jiffies));
+            *(unsigned long*)page_address(pgenpci_dev -> jiffies_pages[0]) = jiffies_64;
+
             break;
 
         default:
@@ -746,17 +817,12 @@ static int genpci_probe(struct pci_dev *pdev, const struct pci_device_id *id){
     pgenpci_dev->pdev = pci_dev_get(pdev);
 	pci_set_drvdata(pdev, pgenpci_dev);
 
-    n = pci_alloc_irq_vectors(pdev, 1, vectors, PCI_IRQ_ALL_TYPES | PCI_IRQ_AFFINITY);
-
-    pr_info("vector num: %d\n", n);
-
-    if (n < 0) {
-        ret = -ENOMEM;
-        goto out_pci_alloc_irq_vectors;
-	}
+    pgenpci_dev->num_irq_vector = 0;
 
     INIT_LIST_HEAD(&pgenpci_dev->memlist);   
     INIT_LIST_HEAD(&pgenpci_dev->signallist);   
+
+    pgenpci_dev -> set_jiffies = false;
 
 #if defined(USE_DUMMYBLK_LIST)
 
@@ -777,10 +843,7 @@ static int genpci_probe(struct pci_dev *pdev, const struct pci_device_id *id){
 
 
 out_kzalloc:
-    pci_free_irq_vectors(pdev);
 
-
-out_pci_alloc_irq_vectors:
     pci_set_drvdata(pdev, NULL);
     pci_release_regions(pdev);  
 
@@ -811,6 +874,12 @@ static void genpci_remove(struct pci_dev* pdev){
 
     struct genpci_dev *pgenpci_dev = pci_get_drvdata(pdev);
     pgenpci_dev->is_open = 0;
+
+    if(pgenpci_dev -> set_jiffies == true){
+        put_page(pgenpci_dev -> jiffies_pages[0]);
+        kfree(pgenpci_dev -> jiffies_pages);
+        pgenpci_dev -> set_jiffies = false;
+    }
 
 #if defined(USE_DUMMYBLK_LIST)
 
@@ -872,10 +941,13 @@ static void genpci_remove(struct pci_dev* pdev){
         list_del(&singnal_list_h->list);
         free_irq(singnal_list_h->irq_no , singnal_list_h->id);
         eventfd_ctx_put(singnal_list_h -> trigger);
+        kfree(singnal_list_h->irqname);
+                
         kfree(singnal_list_h);        
     }
 
     pci_free_irq_vectors(pgenpci_dev->pdev);
+
     pci_set_drvdata(pdev, NULL);
 	pci_release_regions(pdev);
     pci_disable_device(pdev);
@@ -968,8 +1040,8 @@ static void genpci_exit(void) {
     pr_info("%s\n", __func__);
 
     //remove_proc_entry(PROC_NAME, NULL);
-    pci_unregister_driver(&genpci_driver);  //ドライバー名、table, コールバック関数(probe, remove)を削除  
-
+    pci_unregister_driver(&genpci_driver);  
+    
     unregister_blkdev(blk_major, "dummyblk");
 
     class_destroy(genpci_class);

@@ -14,6 +14,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <cstring>
+# include <errno.h>
 #include "common.h"
 #include "nvme.h"
 
@@ -24,8 +25,8 @@ public:
         instance_no = ctrl_no;
         bar0_virt = nullptr;
         config_virt = nullptr;
+        jiffies_p = nullptr;
         pthread_mutex_init(&alloc_dma_m, NULL);
-
 
         get_bdf();
         get_pci_config_addr();
@@ -37,14 +38,15 @@ public:
     }
 
     ~GenPci(){
-        close(efd);
-        close(epfd);
-
+        for(int i= 0; i<32; ++i)close(efd[i]);
+        for(int i= 0; i<32; ++i)close(epfd[i]);
 
         pthread_mutex_destroy(&alloc_dma_m);
 
         if(bar0_virt != nullptr) munmap(bar0_virt, 8192);
         if(config_virt != nullptr) munmap(config_virt, 4096);
+
+        if(jiffies_p != nullptr) free(jiffies_p);
         close(genpcifd);
     }
 
@@ -152,16 +154,17 @@ public:
 
     }
 
-    void set_MSIX(char* name, int vector){
-        efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    void set_INTx(int vectornum){
+        if(vectornum > support_vector_num) return;
+        efd[0] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
         //ASSERT(efd >= 0, "efd init failed");
-        if(efd < 0){
+        if(efd[0] < 0){
             exit(-1);
         }
 
-        epfd = epoll_create1(EPOLL_CLOEXEC);
+        epfd[0] = epoll_create1(EPOLL_CLOEXEC);
         //ASSERT(epfd >= 0, "failed to create epoll fd");
-        if(epfd < 0){
+        if(epfd[0] < 0){
             exit(-1);
         }
 
@@ -169,34 +172,131 @@ public:
         struct epoll_event ev = {0}; //{.events = EPOLLIN | EPOLLPRI,
                                      //.data.fd = dev->efds[i]};
         ev.events = EPOLLIN | EPOLLPRI;
-        ev.data.fd = efd;
+        ev.data.fd = efd[0];
 
-        int ret = epoll_ctl(epfd, EPOLL_CTL_ADD, efd, &ev);
+        int ret = epoll_ctl(epfd[0], EPOLL_CTL_ADD, efd[0], &ev);
         //ASSERT(ret == 0, "cannot add fd to epoll");
         if(ret != 0){
             exit(-1);
         }
 
-        //std::thread th(func, &epfd);
-        sleep(3);
-
         struct test_params params;
-        params.s.fd = efd;
-        params.s.msix = true;
-        strncpy(params.s.name, name, 32); 
+        params.s.fd[0] = efd[0];
+        params.s.irq_mode = INTX;
+        params.s.vectornum = vectornum;
 
-        params.s.vector = vector;
-
-        int rc = ioctl(genpcifd, IOCTL_SET_SIGNAL  , &params);
+        int rc = ioctl(genpcifd, IOCTL_SET_SIGNAL, &params);
         if(rc){
             perror("ioctl");
             exit(-1);
         }
     }
 
+    void set_MSIX(int vectornum){
+        struct test_params params;
+
+        if(vectornum > support_vector_num) return;
+
+        for(int i=0; i< vectornum; ++i){
+            efd[i] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+            //ASSERT(efd >= 0, "efd init failed");
+            if(efd[i] < 0){
+                std::cerr << "error: eventfd" << std::endl;
+                exit(-1);
+            }
+
+            epfd[i] = epoll_create1(EPOLL_CLOEXEC);
+            //ASSERT(epfd >= 0, "failed to create epoll fd");
+            if(epfd[i] < 0){
+                std::cerr << "error: create1" << std::endl;
+                exit(-1);
+            }
+
+            // Add eventfd to epoll
+            struct epoll_event ev = {0}; //{.events = EPOLLIN | EPOLLPRI,
+                                         //.data.fd = dev->efds[i]};
+            ev.events = EPOLLIN | EPOLLPRI;
+            ev.data.fd = efd[i];
+
+            int ret = epoll_ctl(epfd[i], EPOLL_CTL_ADD, efd[i], &ev);
+            //ASSERT(ret == 0, "cannot add fd to epoll");
+            if(ret != 0){
+                std::cerr << "error: epoll_ctl" << std::endl;
+                exit(-1);
+            }
+
+            params.s.fd[i] = efd[i];
+        
+        }
+
+        params.s.irq_mode = MSIX;
+        params.s.vectornum = vectornum;
+
+        int rc = ioctl(genpcifd, IOCTL_SET_SIGNAL, &params);
+        if(rc){
+            perror("ioctl");
+            exit(-1);
+        }
+    }
+
+    void set_jiffies(){
+        struct test_params params;
+        int ret = posix_memalign(&jiffies_p, 4096, 4096);
+        if(ret != 0){
+            perror("posix_memalign");
+            exit(-1);
+        }
+
+	    params.j.buf = (__le64)jiffies_p;
+
+	    int rc = ioctl(genpcifd, IOCTL_SETUP_JIFFIES, &params);
+        if(rc){
+            perror("ioctl");
+            exit(-1);
+        }
+    }
+
+    uint64_t get_jiffies(){
+        struct test_params params = {0};
+        int rc = ioctl(genpcifd, IOCTL_GET_JIFFIES, &params);
+        if(rc){
+            perror("ioctl");
+            exit(-1);
+        }
+
+        return *(uint64_t*)jiffies_p;
+    }
+
+    void create_dummy_blk(int num){
+        struct test_params params = {0};
+        for(int i=0; i< num;++i){
+            int ret = posix_memalign(&dummyblk_buf[i], 4096, 4096);
+            if(ret != 0){
+                perror("posix_memalign");
+                exit(-1);
+            }
+
+            params.d.number = i;
+	        params.d.len = 4096;
+	        params.d.buf = (__le64)dummyblk_buf[i];
+
+            int rc = ioctl(genpcifd, IOCTL_ALLOC_DUMMYBLK, &params);
+
+            if(rc){
+                perror("ioctl");
+                exit(-1);
+            }
+        }
+
+    }
+
+
+
+
+
 private:
-    int efd;
-    int epfd;
+    int efd[support_vector_num];
+    int epfd[support_vector_num];
 
     pthread_mutex_t	alloc_dma_m;
 
@@ -209,10 +309,13 @@ private:
 
     uint64_t pci_addr;
     uint64_t bar0;
+    void*   jiffies_p; 
+
+    void*  dummyblk_buf[128];  
 
 protected:
-    void*    bar0_virt;
-    void*    config_virt;
+    void*   bar0_virt;
+    void*   config_virt;
 };
 
 class NVMeCtrl: public GenPci{
@@ -221,10 +324,12 @@ public:
     NVMeCtrl(int instance_no):GenPci(instance_no){
         ctrl_reg = (nvme_controller_reg_t*)bar0_virt;
         init_ctrl();
-        char name[32] = {0};
-        sprintf(name, "testirq%d", instance_no);
-        set_MSIX(name, 0);
-   
+        
+        set_MSIX(3);
+        //set_INTx(1);
+        set_jiffies();
+        std::cout << get_jiffies() << std::endl;
+        create_dummy_blk(5);
     }
 
     ~NVMeCtrl(){}
@@ -336,6 +441,5 @@ private:
 
 int main(){
     std::shared_ptr<NVMeCtrl> p = std::make_shared<NVMeCtrl>(0);
-    sleep(10);
-
+    sleep(10);   
 }

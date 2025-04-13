@@ -1,11 +1,19 @@
 #ifndef _COMMON_H
 #define _COMMON_H
 
+#define support_vector_num (32)
+
+enum irq_mode{
+    INTX = (1 << 0), 
+    MSI	 = 	(1 << 1) ,
+    MSIX =	(1 << 2) ,
+};
+
 struct signal{
-    int vector;
-    int fd;
-    int msix;
-    char name[32];
+    int vectornum;
+    int fd[support_vector_num];
+    enum irq_mode irq_mode;
+//
 };
 
 struct mem{
@@ -54,6 +62,7 @@ struct stats {
     unsigned long io_ticks; // %util svctm
     unsigned long time_in_queue; // avgqu-sz
 };
+
 
 
 // ioctls
