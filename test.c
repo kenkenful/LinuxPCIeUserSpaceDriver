@@ -38,9 +38,6 @@ static dev_t genpci_chr_devt;
 
 static int blk_major;
 
-#define PCI_VENDOR_ID_TEST 0x144d
-#define PCI_DEVICE_ID_TEST 0xa808
-
 struct dma_entry {
     struct list_head list;
     void *virt_addr;
@@ -280,16 +277,16 @@ static irqreturn_t intx_irq(int irq, void *arg)
 {
 	struct genpci_dev *pgenpci_dev = arg;
 
-	if (pci_check_and_mask_intx(pgenpci_dev->pdev)) {
+	//if (pci_check_and_mask_intx(pgenpci_dev->pdev)) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,12)
 		eventfd_signal(pgenpci_dev->trigger);
 #else
         eventfd_signal(pgenpci_dev->trigger, 1);
 #endif
 		return IRQ_HANDLED;
-	}
+	//}
 
-	return IRQ_NONE;
+	//return IRQ_NONE;
 }
 
 static const struct block_device_operations bops = {
