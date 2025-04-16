@@ -672,7 +672,7 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
 
 		    part_stat_add(pgenpci_dev->dummyblk_entry_p[p->id].gendisk->part0, sectors[p->iotype], p->bytes >> 9);
             
-            unsigned long duration = ktime_get_ns(); - p->start_time_ns;
+            unsigned long duration = ktime_get_ns() - p->start_time_ns;
             part_stat_add(pgenpci_dev->dummyblk_entry_p[p->id].gendisk->part0, nsecs[p->iotype], duration);
 
             part_stat_unlock();
