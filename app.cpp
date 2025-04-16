@@ -47,7 +47,7 @@ public:
 
         if(bar0_virt != nullptr) munmap(bar0_virt, 8192);
         if(config_virt != nullptr) munmap(config_virt, 4096);
-        if(dummyblk_buf != nullptr)free(dummyblk_buf);
+        if(stats_buf != nullptr)free(stats_buf);
         
         if(jiffies_p != nullptr) free(jiffies_p);
         close(genpcifd);
@@ -257,28 +257,28 @@ public:
         printf("vector_num: %d\n", vector_num);
     }
 
-    void set_jiffies(){
+    void setup_ktime(){
         struct test_params params;
         int ret = posix_memalign(&jiffies_p, 4096, 4096);
         if(ret != 0){
-            perror("posix_memalign in set_jiffies");
+            perror("posix_memalign in setup_ktime");
             exit(-1);
         }
 
-	    params.j.buf = (__le64)jiffies_p;
+	    params.k.buf = (__le64)jiffies_p;
 
-	    int rc = ioctl(genpcifd, IOCTL_SETUP_JIFFIES, &params);
+	    int rc = ioctl(genpcifd, IOCTL_SETUP_KTIME, &params);
         if(rc){
-            perror("ioctl in set_jiffies");
+            perror("ioctl in setup_ktime");
             exit(-1);
         }
     }
 
-    uint64_t get_jiffies(){
+    uint64_t get_ktime(){
         struct test_params params = {0};
-        int rc = ioctl(genpcifd, IOCTL_GET_JIFFIES, nullptr);
+        int rc = ioctl(genpcifd, IOCTL_GET_KTIME, nullptr);
         if(rc){
-            perror("ioctl in get_jiffies");
+            perror("ioctl in get_ktime");
             exit(-1);
         }
 
@@ -287,12 +287,12 @@ public:
 
     void allocate_stats_buffer(){
         struct test_params params = {0};
-        int ret = posix_memalign(&dummyblk_buf, 4096, 4096);
+        int ret = posix_memalign(&stats_buf, 4096, 4096);
         if(ret != 0){
             perror("posix_memalign in create_dummy_blk");
             exit(-1);
         }
-        params.a.buf = (__le64)dummyblk_buf;
+        params.a.buf = (__le64)stats_buf;
 
         int rc = ioctl(genpcifd, IOCTL_SEUTP_STATS_BUFFER, &params);
         if(rc){
@@ -311,6 +311,23 @@ public:
         }
     }
 
+    void record_stats(int id, enum iotype iotype, unsigned int bytes, unsigned long start_time_ns){
+        struct stats *stats = (struct stats *)stats_buf;
+        stats->id = id;
+        stats->iotype = iotype;
+        stats->bytes = bytes;
+        stats->start_time_ns = start_time_ns;
+
+        int rc = ioctl(genpcifd, IOCTL_RECORD_STATS, nullptr);
+        if(rc){
+            perror("ioctl in record_stats");
+            exit(-1);
+        }
+
+
+
+    }
+
 private:
 
     pthread_mutex_t	alloc_dma_mutex;
@@ -326,7 +343,7 @@ private:
     uint64_t bar0;
     void*   jiffies_p; 
 
-    void*  dummyblk_buf;  
+    void*  stats_buf;  
 
 protected:
     void*   bar0_virt;
@@ -346,14 +363,14 @@ public:
         //set_MSIX(1);
         //kick_msix_intr_thread();
 
-        //set_INTx(1);
-        //kick_intx_intr_thread();
+        set_INTx(1);
+        kick_intx_intr_thread();
 
-        kick_polling_thread();
+        //kick_polling_thread();
 
         allocate_stats_buffer();
         create_dummy_blk(0);
-        set_jiffies();
+        setup_ktime();
         //create_dummy_blk(5);
         
         pthread_mutex_init(&cq_mutex, NULL);
@@ -387,17 +404,17 @@ public:
                 if (evs.data.fd == efd[i]) {
                     if(i == 0){
                         //printf("MSIx vector 0 interrupt ocuured\n");      
-                        if (admin_cq_entry[admin_cq_head].u.a.p == admin_cq_phase) {
-				            while (admin_cq_entry[admin_cq_head].u.a.p == admin_cq_phase) {
+                        if (cq[0].entry[cq[0].head].u.a.p == cq[0].phase) {
+				            while (cq[0].entry[cq[0].head].u.a.p == cq[0].phase) {
 					            printf("MSIX Interrupt Occured\n");
-                                std::cout << get_jiffies() << std::endl;
+                                std::cout << get_ktime() << std::endl;
 
 					            //int head = p->admin_cq_head;
-					            if (++admin_cq_head == admin_cq_size) {
-					            	admin_cq_head = 0;
-					            	admin_cq_phase = !admin_cq_phase;
+					            if (++cq[0].head == cq[0].size) {
+					            	cq[0].head = 0;
+					            	cq[0].phase = !cq[0].phase;
 					            }
-					            *(volatile u32*)(admin_cq_doorbell) = admin_cq_head;
+					            *(volatile u32*)(cq[0].doorbell) = cq[0].head;
 					            //ctrl_reg->sq0tdbl[1] = admin_cq_head;
 					        }
 		            	}
@@ -432,7 +449,6 @@ public:
 
         for (;;) {
             printf("waiting interrupts...\n");
-            // blocking wait
             int rc = epoll_wait(epfd, &evs, 1, -1);
             if(rc <= 0){
                 perror("epoll_wait");
@@ -446,19 +462,16 @@ public:
 
             for(int i=0; i<vector_num; ++i){
                 if (evs.data.fd == efd[i]) {
-                    //printf("INTx interrupt ocuured\n");      
-                    if (admin_cq_entry[admin_cq_head].u.a.p == admin_cq_phase) {
-			            while (admin_cq_entry[admin_cq_head].u.a.p == admin_cq_phase) {
+                    if (cq[0].entry[cq[0].head].u.a.p == cq[0].phase) {
+			            while (cq[0].entry[cq[0].head].u.a.p == cq[0].phase) {
 			    	        printf("INT-X Interrupt Occured\n");
-                            std::cout << get_jiffies() << std::endl;
+                            std::cout << get_ktime() << std::endl;
 
-			    	        //int head = p->admin_cq_head;
-			    	        if (++admin_cq_head == admin_cq_size) {
-			    	        	admin_cq_head = 0;
-			    	        	admin_cq_phase = !admin_cq_phase;
+			    	        if (++cq[0].head == cq[0].size) {
+			    	        	cq[0].head = 0;
+			    	        	cq[0].phase = !cq[0].phase;
 			    	        }
-			    	        *(volatile u32*)(admin_cq_doorbell) = admin_cq_head;
-			    	        //ctrl_reg->sq0tdbl[1] = admin_cq_head;
+			    	        *(volatile u32*)(cq[0].doorbell) = cq[0].head;
 			    	    }
                     }
                 }
@@ -483,15 +496,15 @@ public:
 
     void* polling_handler(void){
         for (;;) {
-            if (admin_cq_entry[admin_cq_head].u.a.p == admin_cq_phase) {
-			    while (admin_cq_entry[admin_cq_head].u.a.p == admin_cq_phase) {
+            if (cq[0].entry[cq[0].head].u.a.p == cq[0].phase) {
+			    while (cq[0].entry[cq[0].head].u.a.p == cq[0].phase) {
 			        printf("receive response\n");
-                    std::cout << get_jiffies() << std::endl;
-			        if (++admin_cq_head == admin_cq_size) {
-			        	admin_cq_head = 0;
-			        	admin_cq_phase = !admin_cq_phase;
+                    std::cout << get_ktime() << std::endl;
+			        if (++cq[0].head == cq[0].size) {
+			        	cq[0].head = 0;
+			        	cq[0].phase = !cq[0].phase;
 			        }
-			        *(volatile u32*)(admin_cq_doorbell) = admin_cq_head;
+			        *(volatile u32*)(cq[0].doorbell) = cq[0].head;
 			    }
             }
             usleep(1);         
@@ -545,33 +558,33 @@ public:
 
     void init_adminQ(int cq_depth, int sq_depth){
         nvme_adminq_attr_t	aqa = { 0 };
-        admin_sq_tail = 0;
-	    admin_cq_head = 0;
-	    admin_cq_phase = 1;
+        sq[0].tail = 0;
+	    cq[0].head = 0;
+	    cq[0].phase = 1;
 
-	    admin_cq_size = cq_depth;
-	    admin_sq_size = sq_depth;
+	    cq[0].size = cq_depth;
+	    sq[0].size = sq_depth;
         
-        ctrl_reg->aqa.a.acqs = admin_cq_size -1;
-        ctrl_reg->aqa.a.asqs = admin_sq_size -1;
+        ctrl_reg->aqa.a.acqs = cq[0].size -1;
+        ctrl_reg->aqa.a.asqs = sq[0].size -1;
 
-        admin_cq_entry = (nvme_cq_entry_t*)alloc_dma(sizeof(nvme_cq_entry_t) * admin_cq_size, admin_cq_amd_addr);
-        if(admin_cq_entry == nullptr){
+        cq[0].entry = (nvme_cq_entry_t*)alloc_dma(sizeof(nvme_cq_entry_t) * cq[0].size, cq[0].dma_addr);
+        if(cq[0].entry == nullptr){
             std::cerr << "cannot allocate admin cq" << std::endl;
             exit(1);
         }
         
-        admin_sq_entry = (nvme_sq_entry_t*)alloc_dma(sizeof(nvme_sq_entry_t) * admin_sq_size, admin_sq_amd_addr);
-        if(admin_sq_entry == nullptr){
+        sq[0].entry = (nvme_sq_entry_t*)alloc_dma(sizeof(nvme_sq_entry_t) * sq[0].size, sq[0].dma_addr);
+        if(sq[0].entry == nullptr){
             std::cerr << "cannot allocate admin sq" << std::endl;
             exit(1);
         }
 
-        ctrl_reg->acq = admin_cq_amd_addr;
-	    ctrl_reg->asq = admin_sq_amd_addr;
+        ctrl_reg->acq = cq[0].dma_addr;
+	    ctrl_reg->asq = sq[0].dma_addr;
 
-        admin_sq_doorbell = &ctrl_reg->sq0tdbl[0];
-	    admin_cq_doorbell = &ctrl_reg->sq0tdbl[0] + (1 << ctrl_reg->cap.a.dstrd);
+        sq[0].doorbell = &ctrl_reg->sq0tdbl[0];
+	    cq[0].doorbell = &ctrl_reg->sq0tdbl[0] + (1 << ctrl_reg->cap.a.dstrd);
 
     }
 
@@ -597,7 +610,7 @@ public:
 
 
     void issueCommand(nvme_sq_entry_t *entry, int data_len){
-        int cid = admin_sq_tail;
+        int cid = sq[0].tail;
         uint64_t data_addr;
 
         if(data_len){
@@ -610,10 +623,10 @@ public:
         }
 
         entry->common.command_id = cid;
-        memcpy(&admin_sq_entry[cid], entry, sizeof(nvme_sq_entry_t));
+        memcpy(&sq[0].entry[cid], entry, sizeof(nvme_sq_entry_t));
         
-        if (++admin_sq_tail == admin_sq_size) admin_sq_tail = 0;
-		*(volatile u32*)admin_sq_doorbell = admin_sq_tail;
+        if (++sq[0].tail == sq[0].size) sq[0].tail = 0;
+		*(volatile u32*)sq[0].doorbell = sq[0].tail;
 
     }
 
@@ -623,19 +636,39 @@ private:
     pthread_t intr_th;
     nvme_controller_reg_t* ctrl_reg;
 
-    int admin_cq_size;
-	int admin_sq_size;
-	int admin_sq_tail;
-	int admin_cq_head;
-	int admin_cq_phase;
+    typedef struct sq{
+        int              size;
+	    int              tail;
+        uint64_t         dma_addr;
+	    nvme_sq_entry_t* entry;
+        void*            doorbell;
+    }SQ_t;
 
-    uint64_t admin_cq_amd_addr;
-    uint64_t admin_sq_amd_addr;
-	nvme_sq_entry_t* admin_sq_entry;
-	nvme_cq_entry_t* admin_cq_entry;
+    typedef struct cq{
+        int              size;
+        int              head;
+    	int              phase;
+        uint64_t         dma_addr;
+        nvme_cq_entry_t* entry;
+        void*            doorbell;    
+    }CQ_t;
 
-    void* admin_cq_doorbell;
-	void* admin_sq_doorbell;
+    SQ_t sq[32];
+    CQ_t cq[32];
+
+    //int admin_cq_size;
+	//int admin_sq_size;
+	//int admin_sq_tail;
+	//int admin_cq_head;
+	//int admin_cq_phase;
+
+    //uint64_t admin_cq_amd_addr;
+    //uint64_t admin_sq_amd_addr;
+	//nvme_sq_entry_t* admin_sq_entry;
+	//nvme_cq_entry_t* admin_cq_entry;
+
+    //void* admin_cq_doorbell;
+	//void* admin_sq_doorbell;
 
 };
 
@@ -650,10 +683,10 @@ int main(){
     std::shared_ptr<NVMeCtrl> ctrl = std::make_shared<NVMeCtrl>(0);
     sleep(1);   
     nvme_sq_entry_t entry = {0};
-    std::cout << ctrl ->get_jiffies() << std::endl;
+    std::cout << ctrl ->get_ktime() << std::endl;
 
     issue_identify_ctrl(ctrl, &entry);
 
-    
+     ctrl ->record_stats(0, iotype::Read, 4096 , ctrl ->get_ktime() );
     sleep(5);   
 }

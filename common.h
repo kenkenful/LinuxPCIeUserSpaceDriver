@@ -31,11 +31,9 @@ struct bus{
 
 };
 
-struct jiffies{
+struct ktime{
     __le64  buf;
-    __le64  phys_addr;
 };
-
 
 struct dummyblk{
     int     number;
@@ -45,27 +43,30 @@ struct allocate_statsbuffer{
     __le64  buf;
 };
 
-
 struct test_params{
     union{
         struct signal s;
         struct mem m;
         struct bus b;
         struct dummyblk d;
-        struct jiffies j;
+        struct ktime k;
         struct allocate_statsbuffer a;
     };
 
 };
 
+enum iotype{
+    Read = 0,
+    Write = 1
+};
+
+
 struct stats {
     int id;
-    unsigned long sectors[2];   /* READs and WRITEs */  // rsec/s wsec/s avgrq-sz
-    unsigned long ios[2];  // r/s w/s
-    unsigned long merges[2]; // rrqm/s wrqm/s
-    unsigned long ticks[2];  // await r_wait w_wait
-    unsigned long io_ticks; // %util svctm
-    unsigned long time_in_queue; // avgqu-sz
+    enum iotype iotype;     /* 0: read, 1: write */
+    unsigned int bytes;
+    unsigned long start_time_ns;
+
 };
 
 
@@ -78,9 +79,9 @@ struct stats {
 #define IOCTL_RELEASE_MEM           _IOW(NVME, 4, struct test_params*)    
 #define IOCTL_ALLOC_DUMMYBLK        _IOW(NVME, 5, struct test_params*)    
 #define IOCTL_RECORD_STATS          _IOW(NVME, 6, struct test_params*)    
-#define IOCTL_SETUP_JIFFIES         _IOW(NVME, 7, struct test_params*)
-#define IOCTL_GET_JIFFIES           _IOW(NVME, 8, struct test_params*)
-#define IOCTL_GET_PHYSADDR_JIFFIES  _IOW(NVME, 9, struct test_params*)
+#define IOCTL_SETUP_KTIME            _IOW(NVME, 7, struct test_params*)
+#define IOCTL_GET_KTIME             _IOW(NVME, 8, struct test_params*)
+//#define IOCTL_GET_PHYSADDR_JIFFIES  _IOW(NVME, 9, struct test_params*)
 #define IOCTL_SEUTP_STATS_BUFFER    _IOW(NVME, 10, struct test_params*)
 
 #endif

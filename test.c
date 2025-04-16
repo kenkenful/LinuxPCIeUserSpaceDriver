@@ -86,10 +86,7 @@ struct genpci_dev{
     struct dummyblk_entry *dummyblk_entry_p;
 #endif
 
-    //bool set_jiffies;
-    struct page **jiffies_pages;
-
-    //bool set_statsbuffer;
+    struct page **ktime_npages;
     struct page **stats_pages;
 };
 
@@ -127,10 +124,10 @@ static int genpci_close(struct inode* inode, struct file* filp){
     struct dma_entry *dma_list_h;
     struct dma_entry *dma_list_e = NULL;
 
-    if(pgenpci_dev -> jiffies_pages != NULL){
-        put_page(pgenpci_dev -> jiffies_pages[0]);
-        kfree(pgenpci_dev -> jiffies_pages);
-        pgenpci_dev -> jiffies_pages = NULL;
+    if(pgenpci_dev -> ktime_npages != NULL){
+        put_page(pgenpci_dev -> ktime_npages[0]);
+        kfree(pgenpci_dev -> ktime_npages);
+        pgenpci_dev -> ktime_npages = NULL;
     }
     
     list_for_each_entry_safe(dma_list_h, dma_list_e, &pgenpci_dev->memlist, list) {
@@ -187,15 +184,6 @@ static int genpci_close(struct inode* inode, struct file* filp){
             blk_cleanup_queue(pgenpci_dev -> dummyblk_entry_p[i].gendisk->queue);
 #endif
 	        put_disk(pgenpci_dev -> dummyblk_entry_p[i].gendisk);
-
-            /* This is test code.*/
-            //uint8_t *data = (uint8_t*) page_address(pgenpci_dev->dummyblk_entry_p[i].pages[0]);
-            //pr_info("receivce data: %x\n", data[0]);
-            //pr_info("receivce data: %x\n", data[1]);
-            //pr_info("receivce data: %x\n", data[2]);
-
-            //for(int j=0; j< pgenpci_dev->dummyblk_entry_p[i].npages; ++j) put_page(pgenpci_dev->dummyblk_entry_p[i].pages[j]);
-            //kfree(pgenpci_dev->dummyblk_entry_p[i].pages);
 
             pgenpci_dev -> dummyblk_entry_p[i].gendisk = NULL;
         }
@@ -356,9 +344,7 @@ int dummyblk_add(int major, struct genpci_dev * pgenpci_dev, int number/*, struc
     list_add(&entry->list, &pgenpci_dev-> dummyblklist);
 #else
     if( pgenpci_dev -> dummyblk_entry_p[number].gendisk == NULL){
-        //pgenpci_dev -> dummyblk_entry_p[number].pages = pages;    
         pgenpci_dev -> dummyblk_entry_p[number].gendisk = gdisk;
-        //pgenpci_dev -> dummyblk_entry_p[number].npages = npages;    
     }else {    
         pr_err("dummyblk is already set.\n");
         del_gendisk(gdisk);
@@ -680,10 +666,14 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
             // not impemented
 #else 
             part_stat_lock();
-            part_stat_inc(pgenpci_dev->dummyblk_entry_p[0].gendisk->part0, ios[0]);
+            //update_io_ticks(pgenpci_dev->dummyblk_entry_p[p->id].gendisk->part0, jiffies, true);
+            struct stats *p = (struct stats *)page_address(pgenpci_dev -> stats_pages[0]); 
+            part_stat_inc(pgenpci_dev->dummyblk_entry_p[p->id].gendisk->part0, ios[p->iotype]);
 
-		    //part_stat_add(req->part, sectors[sgrp], bytes >> 9);
-
+		    part_stat_add(pgenpci_dev->dummyblk_entry_p[p->id].gendisk->part0, sectors[p->iotype], p->bytes >> 9);
+            
+            unsigned long duration = ktime_get_ns(); - p->start_time_ns;
+            part_stat_add(pgenpci_dev->dummyblk_entry_p[p->id].gendisk->part0, nsecs[p->iotype], duration);
 
             part_stat_unlock();
 
@@ -691,19 +681,19 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
 
             break;
 
-        case IOCTL_SETUP_JIFFIES:
-            if(pgenpci_dev -> jiffies_pages != NULL) return -EEXIST;
+        case IOCTL_SETUP_KTIME:
+            if(pgenpci_dev -> ktime_npages != NULL) return -EEXIST;
 
             if(copy_from_user(&params, (void  __user*)ioctlparam, sizeof(struct test_params))){
                 return -EFAULT;
             }
 
-            unsigned long jiffies_data = (unsigned long)params.j.buf;
+            unsigned long ktime_data = (unsigned long)params.k.buf;
             
-            long jiffies_npages = 0;
-            unsigned long jiffies_npages_req = 1;
+            long ktime_npages = 0;
+            unsigned long ktime_npages_req = 1;
 
-            if ((pgenpci_dev -> jiffies_pages =  (struct page**) kvcalloc(jiffies_npages_req, sizeof(struct pages*), GFP_KERNEL)) == NULL){
+            if ((pgenpci_dev -> ktime_npages =  (struct page**) kvcalloc(ktime_npages_req, sizeof(struct pages*), GFP_KERNEL)) == NULL){
                 pr_err("could not allocate memory for pages array\n");
                 return -ENOMEM;
             }
@@ -715,14 +705,14 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0)
-            jiffies_npages = get_user_pages(jiffies_data, jiffies_npages_req, FOLL_WRITE , pgenpci_dev -> jiffies_pages);
+            ktime_npages = get_user_pages(ktime_data, ktime_npages_req, FOLL_WRITE , pgenpci_dev -> ktime_npages);
 #else 
-            jiffies_npages = get_user_pages(jiffies_data, jiffies_npages_req, FOLL_WRITE , pgenpci_dev -> jiffies_pages, NULL);
+            ktime_npages = get_user_pages(ktime_data, ktime_npages_req, FOLL_WRITE , pgenpci_dev -> ktime_npages, NULL);
 #endif
 
-            if (jiffies_npages <= 0){
+            if (ktime_npages <= 0){
                 pr_err("unable to pin any pages in memory\n");
-                kfree(pgenpci_dev -> jiffies_pages);
+                kfree(pgenpci_dev -> ktime_npages);
                 return -ENOMEM;
             }
 
@@ -734,22 +724,22 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
             
             break;
 
-        case IOCTL_GET_JIFFIES:
-            *(unsigned long*)page_address(pgenpci_dev -> jiffies_pages[0]) = jiffies_64;
+        case IOCTL_GET_KTIME:
+            *(unsigned long*)page_address(pgenpci_dev -> ktime_npages[0]) = ktime_get_ns();
 
             break;
 
         default:
             break;
 
-        case IOCTL_GET_PHYSADDR_JIFFIES:
-
-            params.j.phys_addr = virt_to_phys(&jiffies_64);
-
-            if (copy_to_user((void __user *)ioctlparam, &params, sizeof(struct test_params))) {
-			    ret =  -EFAULT;
-		    }
-            break;
+        //case IOCTL_GET_PHYSADDR_JIFFIES:
+        //    
+        //    params.j.phys_addr = virt_to_phys(&jiffies_64);
+        //
+        //    if (copy_to_user((void __user *)ioctlparam, &params, sizeof(struct test_params))) {
+		//	    ret =  -EFAULT;
+		//    }
+        //    break;
     }
 
     return ret;
@@ -850,7 +840,7 @@ static int genpci_probe(struct pci_dev *pdev, const struct pci_device_id *id){
     INIT_LIST_HEAD(&pgenpci_dev->signallist);   
 
     pgenpci_dev->is_open = 0;
-    pgenpci_dev -> jiffies_pages = NULL;
+    pgenpci_dev -> ktime_npages = NULL;
     pgenpci_dev -> stats_pages = NULL;
 
 
@@ -911,10 +901,10 @@ static void genpci_remove(struct pci_dev* pdev){
         pgenpci_dev->stats_pages = NULL;
     }
 
-    if(pgenpci_dev -> jiffies_pages != NULL){
-        put_page(pgenpci_dev -> jiffies_pages[0]);
-        kfree(pgenpci_dev -> jiffies_pages);
-        pgenpci_dev -> jiffies_pages = NULL;
+    if(pgenpci_dev -> ktime_npages != NULL){
+        put_page(pgenpci_dev -> ktime_npages[0]);
+        kfree(pgenpci_dev -> ktime_npages);
+        pgenpci_dev -> ktime_npages = NULL;
     }
 
 #if defined(USE_DUMMYBLK_LIST)
