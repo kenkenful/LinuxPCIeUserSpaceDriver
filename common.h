@@ -1,7 +1,7 @@
 #ifndef _COMMON_H
 #define _COMMON_H
 
-#define support_vector_num (32)
+#define SUPPORT_VECTOR_NUM (32)
 
 enum irq_mode{
     INTX = (1 << 0), 
@@ -11,7 +11,7 @@ enum irq_mode{
 
 struct signal{
     int vectornum;
-    int fd[support_vector_num];
+    int fd[SUPPORT_VECTOR_NUM];
     enum irq_mode irq_mode;
 //
 };
@@ -39,9 +39,12 @@ struct jiffies{
 
 struct dummyblk{
     int     number;
-    __le64  buf;
-    unsigned long len;
 };
+
+struct allocate_statsbuffer{
+    __le64  buf;
+};
+
 
 struct test_params{
     union{
@@ -50,11 +53,13 @@ struct test_params{
         struct bus b;
         struct dummyblk d;
         struct jiffies j;
+        struct allocate_statsbuffer a;
     };
 
 };
 
 struct stats {
+    int id;
     unsigned long sectors[2];   /* READs and WRITEs */  // rsec/s wsec/s avgrq-sz
     unsigned long ios[2];  // r/s w/s
     unsigned long merges[2]; // rrqm/s wrqm/s
@@ -76,6 +81,6 @@ struct stats {
 #define IOCTL_SETUP_JIFFIES         _IOW(NVME, 7, struct test_params*)
 #define IOCTL_GET_JIFFIES           _IOW(NVME, 8, struct test_params*)
 #define IOCTL_GET_PHYSADDR_JIFFIES  _IOW(NVME, 9, struct test_params*)
-
+#define IOCTL_SEUTP_STATS_BUFFER    _IOW(NVME, 10, struct test_params*)
 
 #endif

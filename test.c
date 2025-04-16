@@ -59,8 +59,8 @@ struct dummyblk_entry {
     struct list_head list;
     int number;
 #endif
-    struct page ** pages;
-    long npages;
+    //struct page ** pages;
+    //long npages;
 
     struct gendisk *gendisk;
 };
@@ -86,8 +86,11 @@ struct genpci_dev{
     struct dummyblk_entry *dummyblk_entry_p;
 #endif
 
-    bool set_jiffies ;
+    //bool set_jiffies;
     struct page **jiffies_pages;
+
+    //bool set_statsbuffer;
+    struct page **stats_pages;
 };
 
 static const struct pci_device_id genpci_ids[] =
@@ -115,13 +118,19 @@ static int genpci_close(struct inode* inode, struct file* filp){
 
     struct genpci_dev *pgenpci_dev = filp->private_data;
 
+    if(pgenpci_dev->stats_pages != NULL){
+        put_page(pgenpci_dev -> stats_pages[0]);
+        kfree(pgenpci_dev-> stats_pages);
+        pgenpci_dev-> stats_pages = NULL;
+    }
+
     struct dma_entry *dma_list_h;
     struct dma_entry *dma_list_e = NULL;
 
-    if(pgenpci_dev -> set_jiffies == true){
+    if(pgenpci_dev -> jiffies_pages != NULL){
         put_page(pgenpci_dev -> jiffies_pages[0]);
         kfree(pgenpci_dev -> jiffies_pages);
-        pgenpci_dev -> set_jiffies = false;
+        pgenpci_dev -> jiffies_pages = NULL;
     }
     
     list_for_each_entry_safe(dma_list_h, dma_list_e, &pgenpci_dev->memlist, list) {
@@ -132,17 +141,17 @@ static int genpci_close(struct inode* inode, struct file* filp){
         kfree(dma_list_h);
     }
 
-    struct signal_entry *singnal_list_h;
-    struct signal_entry *singnal_list_e = NULL;
+    struct signal_entry *signal_list_h;
+    struct signal_entry *signal_list_e = NULL;
 
-    list_for_each_entry_safe(singnal_list_h, singnal_list_e, &pgenpci_dev->signallist, list) {
+    list_for_each_entry_safe(signal_list_h, signal_list_e, &pgenpci_dev->signallist, list) {
         pr_info("safe remove signal in close\n");
-        list_del(&singnal_list_h->list);
-        free_irq(singnal_list_h->irq_no, singnal_list_h -> id);
-        eventfd_ctx_put(singnal_list_h -> trigger);
-        kfree(singnal_list_h->irqname);
+        list_del(&signal_list_h->list);
+        free_irq(signal_list_h->irq_no, signal_list_h -> id);
+        eventfd_ctx_put(signal_list_h -> trigger);
+        kfree(signal_list_h->irqname);
                 
-        kfree(singnal_list_h);
+        kfree(signal_list_h);
     }
 
     pci_free_irq_vectors(pgenpci_dev->pdev);
@@ -185,8 +194,8 @@ static int genpci_close(struct inode* inode, struct file* filp){
             //pr_info("receivce data: %x\n", data[1]);
             //pr_info("receivce data: %x\n", data[2]);
 
-            for(int j=0; j< pgenpci_dev->dummyblk_entry_p[i].npages; ++j) put_page(pgenpci_dev->dummyblk_entry_p[i].pages[j]);
-            kfree(pgenpci_dev->dummyblk_entry_p[i].pages);
+            //for(int j=0; j< pgenpci_dev->dummyblk_entry_p[i].npages; ++j) put_page(pgenpci_dev->dummyblk_entry_p[i].pages[j]);
+            //kfree(pgenpci_dev->dummyblk_entry_p[i].pages);
 
             pgenpci_dev -> dummyblk_entry_p[i].gendisk = NULL;
         }
@@ -293,7 +302,7 @@ static const struct block_device_operations bops = {
 	.owner		= THIS_MODULE,
 };
 
-int dummyblk_add(int major, struct genpci_dev * pgenpci_dev, int number, struct page **pages, long npages)
+int dummyblk_add(int major, struct genpci_dev * pgenpci_dev, int number/*, struct page **pages, long npages*/)
 {
 	struct dummyblk_entry *entry = NULL;
 	int ret = 0;
@@ -347,9 +356,9 @@ int dummyblk_add(int major, struct genpci_dev * pgenpci_dev, int number, struct 
     list_add(&entry->list, &pgenpci_dev-> dummyblklist);
 #else
     if( pgenpci_dev -> dummyblk_entry_p[number].gendisk == NULL){
-        pgenpci_dev -> dummyblk_entry_p[number].pages = pages;    
+        //pgenpci_dev -> dummyblk_entry_p[number].pages = pages;    
         pgenpci_dev -> dummyblk_entry_p[number].gendisk = gdisk;
-        pgenpci_dev -> dummyblk_entry_p[number].npages = npages;    
+        //pgenpci_dev -> dummyblk_entry_p[number].npages = npages;    
     }else {    
         pr_err("dummyblk is already set.\n");
         del_gendisk(gdisk);
@@ -399,15 +408,15 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
                 return ret;
             }
 
-            struct signal_entry *singnal_list_h;
-            struct signal_entry *singnal_list_e = NULL;
+            struct signal_entry *signal_list_h;
+            struct signal_entry *signal_list_e = NULL;
 
-            list_for_each_entry_safe(singnal_list_h, singnal_list_e, &pgenpci_dev->signallist, list) {
-                list_del(&singnal_list_h->list);
-                free_irq(singnal_list_h->irq_no, singnal_list_h -> id);
-                eventfd_ctx_put(singnal_list_h -> trigger);
-                kfree(singnal_list_h->irqname);
-                kfree(singnal_list_h);
+            list_for_each_entry_safe(signal_list_h, signal_list_e, &pgenpci_dev->signallist, list) {
+                list_del(&signal_list_h->list);
+                free_irq(signal_list_h->irq_no, signal_list_h -> id);
+                eventfd_ctx_put(signal_list_h -> trigger);
+                kfree(signal_list_h->irqname);
+                kfree(signal_list_h);
 
             }
 
@@ -472,8 +481,13 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
                 }
 
             }else if(params.s.irq_mode == INTX){
-               
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,8,0) 
                 pgenpci_dev-> num_irq_vector = pci_alloc_irq_vectors( pgenpci_dev-> pdev, 1, vectors, PCI_IRQ_INTX | PCI_IRQ_AFFINITY);
+#else
+                pgenpci_dev-> num_irq_vector = pci_alloc_irq_vectors( pgenpci_dev-> pdev, 1, vectors, PCI_IRQ_LEGACY | PCI_IRQ_AFFINITY);
+#endif
+
                 pr_info("intx vector num: %d\n",  pgenpci_dev-> num_irq_vector );
                 if ( pgenpci_dev-> num_irq_vector < 0) {
                     pgenpci_dev-> num_irq_vector = 0;
@@ -528,6 +542,12 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
                     list_add(&head->list, &pgenpci_dev-> signallist);
                 }
             }
+
+            params.s.vectornum = pgenpci_dev-> num_irq_vector;
+
+            if (copy_to_user((void __user *)ioctlparam, &params, sizeof(struct test_params))) {
+			    ret =  -EFAULT;
+		    }
 
             pr_info("ioctl done\n");
 
@@ -585,22 +605,20 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
             }
 
             break;
-        
-        case IOCTL_ALLOC_DUMMYBLK:
+
+        case IOCTL_SEUTP_STATS_BUFFER:
+            if(pgenpci_dev -> stats_pages != NULL) return -EEXIST;
+
             if(copy_from_user(&params, (void  __user*)ioctlparam, sizeof(struct test_params))){
                 return -EFAULT;
             }
 
-            if( params.d.number >= NUM_OF_DUMMY_FOR_EACH ){
-                return -EFAULT;
-            }
-
             // get_user_page
-            unsigned long udata = (unsigned long)params.d.buf;
+            unsigned long udata = (unsigned long)params.a.buf;
             pr_info("udata: %x\n", udata);
 
             long npages = 0;
-            unsigned long npages_req = ((udata + params.d.len - 1)>>PAGE_SHIFT) - (udata>>PAGE_SHIFT) + 1;
+            unsigned long npages_req = 1;
 
             struct page **pages;
 
@@ -610,7 +628,7 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
 
             pr_info("request page size: %d\n", npages_req);
 
-            if ((pages =  (struct page**) kvcalloc(npages_req, sizeof(struct pages*), GFP_KERNEL)) == NULL){
+            if ((pgenpci_dev -> stats_pages  =  (struct page**) kvcalloc(npages_req, sizeof(struct pages*), GFP_KERNEL)) == NULL){
                 pr_err("could not allocate memory for pages array\n");
                 return -ENOMEM;
             }
@@ -622,14 +640,14 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0)
-            npages = get_user_pages(udata, npages_req, FOLL_WRITE , pages);
+            npages = get_user_pages(udata, npages_req, FOLL_WRITE , pgenpci_dev -> stats_pages );
 #else 
-            npages = get_user_pages(udata, npages_req, FOLL_WRITE , pages, NULL);
+            npages = get_user_pages(udata, npages_req, FOLL_WRITE , pgenpci_dev -> stats_pages , NULL);
 #endif
 
             if (npages <= 0){
                 pr_err("unable to pin any pages in memory\n");
-                kfree(pages);
+                kfree(pgenpci_dev -> stats_pages );
                 return -ENOMEM;
             }
 
@@ -639,18 +657,32 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
             up_read(&current->mm->mmap_sem);
 #endif
 
-            dummyblk_add(blk_major, pgenpci_dev, params.d.number, pages, npages);
+            break;
+
+        case IOCTL_ALLOC_DUMMYBLK:
+            if(copy_from_user(&params, (void  __user*)ioctlparam, sizeof(struct test_params))){
+                return -EFAULT;
+            }
+
+            if( params.d.number >= NUM_OF_DUMMY_FOR_EACH ){
+                return -EFAULT;
+            }
+
+
+            dummyblk_add(blk_major, pgenpci_dev, params.d.number/*, pages, npages*/);
 
             break;
 
         case IOCTL_RECORD_STATS:
 
+
 #if defined(USE_DUMMYBLK_LIST)
-            
+            // not impemented
 #else 
             part_stat_lock();
-            //part_stat_inc(&pgenpci_dev->dummyblklist[0], ios[0]);
+            part_stat_inc(pgenpci_dev->dummyblk_entry_p[0].gendisk->part0, ios[0]);
 
+		    //part_stat_add(req->part, sectors[sgrp], bytes >> 9);
 
 
             part_stat_unlock();
@@ -660,7 +692,7 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
             break;
 
         case IOCTL_SETUP_JIFFIES:
-            if(pgenpci_dev -> set_jiffies == true) return -EEXIST;
+            if(pgenpci_dev -> jiffies_pages != NULL) return -EEXIST;
 
             if(copy_from_user(&params, (void  __user*)ioctlparam, sizeof(struct test_params))){
                 return -EFAULT;
@@ -699,9 +731,7 @@ static long genpci_ioctl(struct file *filp, unsigned int ioctlnum, unsigned long
 #else
             up_read(&current->mm->mmap_sem);
 #endif
-
-            pgenpci_dev -> set_jiffies = true;
-
+            
             break;
 
         case IOCTL_GET_JIFFIES:
@@ -819,7 +849,10 @@ static int genpci_probe(struct pci_dev *pdev, const struct pci_device_id *id){
     INIT_LIST_HEAD(&pgenpci_dev->memlist);   
     INIT_LIST_HEAD(&pgenpci_dev->signallist);   
 
-    pgenpci_dev -> set_jiffies = false;
+    pgenpci_dev->is_open = 0;
+    pgenpci_dev -> jiffies_pages = NULL;
+    pgenpci_dev -> stats_pages = NULL;
+
 
 #if defined(USE_DUMMYBLK_LIST)
 
@@ -872,10 +905,16 @@ static void genpci_remove(struct pci_dev* pdev){
     struct genpci_dev *pgenpci_dev = pci_get_drvdata(pdev);
     pgenpci_dev->is_open = 0;
 
-    if(pgenpci_dev -> set_jiffies == true){
+    if(pgenpci_dev->stats_pages != NULL){
+        put_page(pgenpci_dev -> stats_pages[0]);
+        kfree(pgenpci_dev-> stats_pages);
+        pgenpci_dev->stats_pages = NULL;
+    }
+
+    if(pgenpci_dev -> jiffies_pages != NULL){
         put_page(pgenpci_dev -> jiffies_pages[0]);
         kfree(pgenpci_dev -> jiffies_pages);
-        pgenpci_dev -> set_jiffies = false;
+        pgenpci_dev -> jiffies_pages = NULL;
     }
 
 #if defined(USE_DUMMYBLK_LIST)
@@ -909,8 +948,8 @@ static void genpci_remove(struct pci_dev* pdev){
 #endif
 	        put_disk(pgenpci_dev -> dummyblk_entry_p[i].gendisk);
         
-            for(int j=0; j< pgenpci_dev->dummyblk_entry_p[i].npages; ++j) put_page(pgenpci_dev->dummyblk_entry_p[i].pages[j]);
-            kfree(pgenpci_dev->dummyblk_entry_p[i].pages);
+            //for(int j=0; j< pgenpci_dev->dummyblk_entry_p[i].npages; ++j) put_page(pgenpci_dev->dummyblk_entry_p[i].pages[j]);
+            //kfree(pgenpci_dev->dummyblk_entry_p[i].pages);
             pgenpci_dev -> dummyblk_entry_p[i].gendisk = NULL;
         }
     }
@@ -931,16 +970,16 @@ static void genpci_remove(struct pci_dev* pdev){
         
     }
 
-    struct signal_entry *singnal_list_h;
-    struct signal_entry *singnal_list_e = NULL;
+    struct signal_entry *signal_list_h;
+    struct signal_entry *signal_list_e = NULL;
 
-    list_for_each_entry_safe(singnal_list_h, singnal_list_e, &pgenpci_dev->signallist, list) {
-        list_del(&singnal_list_h->list);
-        free_irq(singnal_list_h->irq_no , singnal_list_h->id);
-        eventfd_ctx_put(singnal_list_h -> trigger);
-        kfree(singnal_list_h->irqname);
+    list_for_each_entry_safe(signal_list_h, signal_list_e, &pgenpci_dev->signallist, list) {
+        list_del(&signal_list_h->list);
+        free_irq(signal_list_h->irq_no , signal_list_h->id);
+        eventfd_ctx_put(signal_list_h -> trigger);
+        kfree(signal_list_h->irqname);
                 
-        kfree(singnal_list_h);        
+        kfree(signal_list_h);        
     }
 
     pci_free_irq_vectors(pgenpci_dev->pdev);

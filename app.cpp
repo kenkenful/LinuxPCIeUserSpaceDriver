@@ -26,7 +26,9 @@ public:
         bar0_virt = nullptr;
         config_virt = nullptr;
         jiffies_p = nullptr;
-        pthread_mutex_init(&alloc_dma_m, NULL);
+        vector_num = 0;
+
+        pthread_mutex_init(&alloc_dma_mutex, NULL);
 
         get_bdf();
         get_pci_config_addr();
@@ -38,14 +40,15 @@ public:
     }
 
     ~GenPci(){
-        for(int i= 0; i<support_vector_num; ++i)close(efd[i]);
+        for(int i= 0; i<SUPPORT_VECTOR_NUM; ++i)close(efd[i]);
         close(epfd);
 
-        pthread_mutex_destroy(&alloc_dma_m);
+        pthread_mutex_destroy(&alloc_dma_mutex);
 
         if(bar0_virt != nullptr) munmap(bar0_virt, 8192);
         if(config_virt != nullptr) munmap(config_virt, 4096);
-
+        if(dummyblk_buf != nullptr)free(dummyblk_buf);
+        
         if(jiffies_p != nullptr) free(jiffies_p);
         close(genpcifd);
     }
@@ -55,7 +58,7 @@ public:
         sprintf(devname, "/dev/genpci%d", instance_no);
         std::cout << devname << std::endl;
         if ((genpcifd=open(devname, O_RDWR|O_SYNC)) < 0) {
-		    perror("open");
+		    perror("open in get_bdf");
 		    exit(-1);
 	    }
 
@@ -63,7 +66,7 @@ public:
         int rc = ioctl(genpcifd, IOCTL_GET_BDF, &param);
 
         if(rc){
-            perror("ioctl");
+            perror("ioctl in get_bdf");
             exit(-1);
         }
 
@@ -80,14 +83,14 @@ public:
       
         int fd = open("/sys/firmware/acpi/tables/MCFG", O_RDONLY);
         if(fd == -1){
-            printf("Error open /sys/firmware/acpi/tables/MCFG  %d\n",fd);
-              exit(-1);
+            perror("open in get_pci_config_addr");
+            exit(-1);
         }
 
         int sz = read(fd, buf, 60);
         if(sz != 60){
-            printf("Error read\n");
-             exit(-1);
+            perror("read in get_pci_config_addr\n");
+            exit(-1);
         }
 
         close(fd);
@@ -99,13 +102,13 @@ public:
     void get_bar0(){
         int fd = open("/dev/mem", O_RDWR | O_DSYNC);
         if(fd == -1){
-            printf("Error open\n");
+            perror("open in get_bar0");
             exit(-1);
         }
 
         config_virt = (uint8_t*)mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_SHARED, fd, pci_addr);
         if(config_virt == MAP_FAILED){
-            printf("Error map\n");
+            perror("mmap in get_bar0");
             close(fd);
         }
 
@@ -118,13 +121,13 @@ public:
     void map_ctrlreg(){
         int fd = open("/dev/mem", O_RDWR|O_SYNC);    
         if(fd == -1){
-            printf("Error open\n");
+            perror("open in map_ctrlreg");
             exit(-1);
         }
 
         bar0_virt =  mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_SHARED, fd, bar0);
         if(bar0_virt == MAP_FAILED){
-            printf("Error map\n");
+            perror("mmap in map_ctrlreg");
             close(fd);
             exit(-1);
         }
@@ -134,83 +137,44 @@ public:
 
     void* alloc_dma(size_t len, uint64_t &dma_addr){
         struct test_params param;
-        pthread_mutex_lock(&alloc_dma_m);	    
+        pthread_mutex_lock(&alloc_dma_mutex);	    
         void* virt_addr = (unsigned int *)mmap(0, len, PROT_READ | PROT_WRITE, MAP_SHARED| MAP_LOCKED, genpcifd, 0);
 
 	    if (virt_addr == MAP_FAILED)	{
-		    perror("mmap");
+		    perror("mmap in alloc_dma");
 		    exit(-1);
 	    }
 
         int rc = ioctl(genpcifd, IOCTL_GET_MEMFINFO, &param);
         if(rc){
-            perror("ioctl");
+            perror("ioctl in alloc_dma");
             exit(-1);
         }
 
         dma_addr = param.m.dma_addr;
-        pthread_mutex_unlock(&alloc_dma_m);
+        pthread_mutex_unlock(&alloc_dma_mutex);
         return virt_addr;
 
     }
 
     void set_INTx(int vectornum){
-        if(vectornum > support_vector_num) return;
-        efd[0] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-        //ASSERT(efd >= 0, "efd init failed");
-        if(efd[0] < 0){
-            exit(-1);
-        }
-
-        epfd = epoll_create1(EPOLL_CLOEXEC);
-        //ASSERT(epfd >= 0, "failed to create epoll fd");
-        if(epfd < 0){
-            exit(-1);
-        }
-
-        // Add eventfd to epoll
-        struct epoll_event ev = {0}; //{.events = EPOLLIN | EPOLLPRI,
-                                     //.data.fd = dev->efds[i]};
-        ev.events = EPOLLIN | EPOLLPRI;
-        ev.data.fd = efd[0];
-
-        int ret = epoll_ctl(epfd, EPOLL_CTL_ADD, efd[0], &ev);
-        //ASSERT(ret == 0, "cannot add fd to epoll");
-        if(ret != 0){
-            exit(-1);
-        }
-
         struct test_params params;
-        params.s.fd[0] = efd[0];
-        params.s.irq_mode = INTX;
-        params.s.vectornum = vectornum;
-
-        int rc = ioctl(genpcifd, IOCTL_SET_SIGNAL, &params);
-        if(rc){
-            perror("ioctl");
-            exit(-1);
-        }
-    }
-
-    void set_MSIX(int vectornum){
-        struct test_params params;
-
-        if(vectornum > support_vector_num) return;
-
-        vector_num = vectornum;
+        
+        vector_num = (vectornum > SUPPORT_VECTOR_NUM) ? SUPPORT_VECTOR_NUM : vectornum;
 
         for(int i=0; i< vector_num; ++i){
+
             efd[i] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
             //ASSERT(efd >= 0, "efd init failed");
             if(efd[i] < 0){
-                std::cerr << "error: eventfd" << std::endl;
+                perror("eventfd in set_INTx");
                 exit(-1);
             }
 
             epfd = epoll_create1(EPOLL_CLOEXEC);
             //ASSERT(epfd >= 0, "failed to create epoll fd");
             if(epfd < 0){
-                std::cerr << "error: create1" << std::endl;
+                perror("create1 in set_INTx");
                 exit(-1);
             }
 
@@ -223,7 +187,56 @@ public:
             int ret = epoll_ctl(epfd, EPOLL_CTL_ADD, efd[i], &ev);
             //ASSERT(ret == 0, "cannot add fd to epoll");
             if(ret != 0){
-                std::cerr << "error: epoll_ctl" << std::endl;
+                perror("epoll_ctl in set_INTx");
+                exit(-1);
+            }
+
+            params.s.fd[i] = efd[i];
+
+        }
+
+        params.s.irq_mode = INTX;
+        params.s.vectornum = vectornum;
+
+        int rc = ioctl(genpcifd, IOCTL_SET_SIGNAL, &params);
+        if(rc){
+            perror("ioctl in set_INTx");
+            exit(-1);
+        }
+        vector_num = params.s.vectornum;
+        printf("vector_num: %d\n", vector_num);
+    }
+
+    void set_MSIX(int vectornum){
+        struct test_params params;
+
+        vector_num = (vectornum > SUPPORT_VECTOR_NUM) ? SUPPORT_VECTOR_NUM : vectornum;
+
+        for(int i=0; i< vector_num; ++i){
+            efd[i] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+            //ASSERT(efd >= 0, "efd init failed");
+            if(efd[i] < 0){
+                perror("eventfd in set_MSIX");
+                exit(-1);
+            }
+
+            epfd = epoll_create1(EPOLL_CLOEXEC);
+            //ASSERT(epfd >= 0, "failed to create epoll fd");
+            if(epfd < 0){
+                perror("create1 in set_MSIX");
+                exit(-1);
+            }
+
+            // Add eventfd to epoll
+            struct epoll_event ev = {0}; //{.events = EPOLLIN | EPOLLPRI,
+                                         //.data.fd = dev->efds[i]};
+            ev.events = EPOLLIN | EPOLLPRI;
+            ev.data.fd = efd[i];
+
+            int ret = epoll_ctl(epfd, EPOLL_CTL_ADD, efd[i], &ev);
+            //ASSERT(ret == 0, "cannot add fd to epoll");
+            if(ret != 0){
+                perror("epoll_ctl in set_MSIX");
                 exit(-1);
             }
 
@@ -232,22 +245,23 @@ public:
         }
 
         params.s.irq_mode = MSIX;
-        params.s.vectornum = vectornum;
+        params.s.vectornum = vector_num;
 
         int rc = ioctl(genpcifd, IOCTL_SET_SIGNAL, &params);
         if(rc){
-            perror("ioctl");
+            perror("ioctl in set_MSIX");
             exit(-1);
         }
+
+        vector_num = params.s.vectornum;
+        printf("vector_num: %d\n", vector_num);
     }
-
-
 
     void set_jiffies(){
         struct test_params params;
         int ret = posix_memalign(&jiffies_p, 4096, 4096);
         if(ret != 0){
-            perror("posix_memalign");
+            perror("posix_memalign in set_jiffies");
             exit(-1);
         }
 
@@ -255,48 +269,51 @@ public:
 
 	    int rc = ioctl(genpcifd, IOCTL_SETUP_JIFFIES, &params);
         if(rc){
-            perror("ioctl");
+            perror("ioctl in set_jiffies");
             exit(-1);
         }
     }
 
     uint64_t get_jiffies(){
         struct test_params params = {0};
-        int rc = ioctl(genpcifd, IOCTL_GET_JIFFIES, &params);
+        int rc = ioctl(genpcifd, IOCTL_GET_JIFFIES, nullptr);
         if(rc){
-            perror("ioctl");
+            perror("ioctl in get_jiffies");
             exit(-1);
         }
 
         return *(uint64_t*)jiffies_p;
     }
 
+    void allocate_stats_buffer(){
+        struct test_params params = {0};
+        int ret = posix_memalign(&dummyblk_buf, 4096, 4096);
+        if(ret != 0){
+            perror("posix_memalign in create_dummy_blk");
+            exit(-1);
+        }
+        params.a.buf = (__le64)dummyblk_buf;
+
+        int rc = ioctl(genpcifd, IOCTL_SEUTP_STATS_BUFFER, &params);
+        if(rc){
+              perror("ioctl in allocate_stats_buffer");
+              exit(-1);
+        }
+    }
+
     void create_dummy_blk(int num){
         struct test_params params = {0};
-        for(int i=0; i< num;++i){
-            int ret = posix_memalign(&dummyblk_buf[i], 4096, 4096);
-            if(ret != 0){
-                perror("posix_memalign");
-                exit(-1);
-            }
-
-            params.d.number = i;
-	        params.d.len = 4096;
-	        params.d.buf = (__le64)dummyblk_buf[i];
-
-            int rc = ioctl(genpcifd, IOCTL_ALLOC_DUMMYBLK, &params);
-
-            if(rc){
-                perror("ioctl");
-                exit(-1);
-            }
+        params.d.number = num;
+        int rc = ioctl(genpcifd, IOCTL_ALLOC_DUMMYBLK, &params);
+        if(rc){
+            perror("ioctl in create_dummy_blk");
+            exit(-1);
         }
-
     }
 
 private:
 
-    pthread_mutex_t	alloc_dma_m;
+    pthread_mutex_t	alloc_dma_mutex;
 
     char devname[20] = {0};
     int instance_no;
@@ -309,12 +326,12 @@ private:
     uint64_t bar0;
     void*   jiffies_p; 
 
-    void*  dummyblk_buf[128];  
+    void*  dummyblk_buf;  
 
 protected:
     void*   bar0_virt;
     void*   config_virt;
-    int     efd[support_vector_num];
+    int     efd[SUPPORT_VECTOR_NUM];
     int     epfd;
     int     vector_num;
 };
@@ -327,27 +344,25 @@ public:
         init_ctrl();
         
         //set_MSIX(1);
-        //set_jiffies();
-        //std::cout << get_jiffies() << std::endl;
-        //create_dummy_blk(5);
         //kick_msix_intr_thread();
-        
-        
-        set_INTx(1);
-        kick_intx_intr_thread();
-        
-        
-        sleep(1);
-        identify();
-        identify();
-        identify();
-        identify();
 
+        //set_INTx(1);
+        //kick_intx_intr_thread();
+
+        kick_polling_thread();
+
+        allocate_stats_buffer();
+        create_dummy_blk(0);
+        set_jiffies();
+        //create_dummy_blk(5);
+        
+        pthread_mutex_init(&cq_mutex, NULL);
 
     }
 
-    ~NVMeCtrl(){}
-
+    ~NVMeCtrl(){
+        pthread_mutex_destroy(&cq_mutex);
+    }
 
     void* msix_handler(void){
 
@@ -359,7 +374,7 @@ public:
             // blocking wait
             int rc = epoll_wait(epfd, &evs, 1, -1);
             if(rc <= 0){
-                printf("epoll error\n");
+                perror("epoll_wait");
                 exit(1);
             }
 
@@ -371,10 +386,11 @@ public:
             for(int i=0; i<vector_num; ++i){
                 if (evs.data.fd == efd[i]) {
                     if(i == 0){
-                        printf("MSIx vector 0 interrupt ocuured\n");      
+                        //printf("MSIx vector 0 interrupt ocuured\n");      
                         if (admin_cq_entry[admin_cq_head].u.a.p == admin_cq_phase) {
 				            while (admin_cq_entry[admin_cq_head].u.a.p == admin_cq_phase) {
-					            printf("Interrupt Occured\n");
+					            printf("MSIX Interrupt Occured\n");
+                                std::cout << get_jiffies() << std::endl;
 
 					            //int head = p->admin_cq_head;
 					            if (++admin_cq_head == admin_cq_size) {
@@ -392,29 +408,24 @@ public:
                     break;
                 }
             }
-
         }
     }
 
     static void* msix_handler_wrapper(void* p){
         return ((NVMeCtrl*)p) -> msix_handler();
-
-
     }
-
 
     void kick_msix_intr_thread(){
         if (pthread_create(&intr_th, NULL, msix_handler_wrapper, this) != 0) {
-            printf("Error: pthread create\n");
-            exit(1);
+            perror("pthread create\n");
+            exit(-1);
         }
         if (pthread_detach(intr_th) != 0) {
-            printf("Error: pthread detach\n");
-            exit(1);
+            perror("pthread detach\n");
+            exit(-1);
         }
     }
 
-#if 1
     void* intx_handler(void){
         struct epoll_event evs;
         u64 u;
@@ -424,36 +435,36 @@ public:
             // blocking wait
             int rc = epoll_wait(epfd, &evs, 1, -1);
             if(rc <= 0){
-                printf("epoll error\n");
+                perror("epoll_wait");
                 exit(1);
             }
 
             ssize_t s = read(evs.data.fd, &u, sizeof(u));
             if(s != sizeof(u)){
-                printf("efd read failed\n");
+                perror("efd read");
             }
 
-            if (evs.data.fd == efd[0]) {
-                printf("INTx interrupt ocuured\n");      
-                if (admin_cq_entry[admin_cq_head].u.a.p == admin_cq_phase) {
-			        while (admin_cq_entry[admin_cq_head].u.a.p == admin_cq_phase) {
-				        printf("Interrupt Occured\n");
-				        //int head = p->admin_cq_head;
-				        if (++admin_cq_head == admin_cq_size) {
-				        	admin_cq_head = 0;
-				        	admin_cq_phase = !admin_cq_phase;
-				        }
-				        *(volatile u32*)(admin_cq_doorbell) = admin_cq_head;
-				        //ctrl_reg->sq0tdbl[1] = admin_cq_head;
-				    }
+            for(int i=0; i<vector_num; ++i){
+                if (evs.data.fd == efd[i]) {
+                    //printf("INTx interrupt ocuured\n");      
+                    if (admin_cq_entry[admin_cq_head].u.a.p == admin_cq_phase) {
+			            while (admin_cq_entry[admin_cq_head].u.a.p == admin_cq_phase) {
+			    	        printf("INT-X Interrupt Occured\n");
+                            std::cout << get_jiffies() << std::endl;
+
+			    	        //int head = p->admin_cq_head;
+			    	        if (++admin_cq_head == admin_cq_size) {
+			    	        	admin_cq_head = 0;
+			    	        	admin_cq_phase = !admin_cq_phase;
+			    	        }
+			    	        *(volatile u32*)(admin_cq_doorbell) = admin_cq_head;
+			    	        //ctrl_reg->sq0tdbl[1] = admin_cq_head;
+			    	    }
+                    }
                 }
             }
-  
-
         }
     }
-#endif
-
 
     static void* intx_handler_wrapper(void* p){
         return ((NVMeCtrl*)p) -> intx_handler();
@@ -461,15 +472,46 @@ public:
 
     void kick_intx_intr_thread(){
         if (pthread_create(&intr_th, NULL, intx_handler_wrapper, this) != 0) {
-            printf("Error: pthread create\n");
-            exit(1);
+            perror("pthread create");
+            exit(-1);
         }
         if (pthread_detach(intr_th) != 0) {
-            printf("Error: pthread detach\n");
-            exit(1);
+            perror("pthread detach");
+            exit(-1);
         }
     }
 
+    void* polling_handler(void){
+        for (;;) {
+            if (admin_cq_entry[admin_cq_head].u.a.p == admin_cq_phase) {
+			    while (admin_cq_entry[admin_cq_head].u.a.p == admin_cq_phase) {
+			        printf("receive response\n");
+                    std::cout << get_jiffies() << std::endl;
+			        if (++admin_cq_head == admin_cq_size) {
+			        	admin_cq_head = 0;
+			        	admin_cq_phase = !admin_cq_phase;
+			        }
+			        *(volatile u32*)(admin_cq_doorbell) = admin_cq_head;
+			    }
+            }
+            usleep(1);         
+        }
+    }
+
+    static void* polling_handler_wrapper(void* p){
+        return ((NVMeCtrl*)p) -> polling_handler();
+    }
+
+    void kick_polling_thread(){
+        if (pthread_create(&intr_th, NULL, polling_handler_wrapper, this) != 0) {
+            perror("pthread create");
+            exit(-1);
+        }
+        if (pthread_detach(intr_th) != 0) {
+            perror("pthread detach");
+            exit(-1);
+        }
+    }
 
     bool wait_ready(){
         int cnt = 0;
@@ -482,7 +524,6 @@ public:
 		    }
             usleep(500000);         
         }
-
         return true;
     }
 
@@ -554,30 +595,31 @@ public:
         return ret;
     }
 
-    void identify(){
-        std::cout << __func__ << std::endl;
-        int cid = admin_sq_tail;
 
+    void issueCommand(nvme_sq_entry_t *entry, int data_len){
+        int cid = admin_sq_tail;
         uint64_t data_addr;
-        void* datap = alloc_dma(4096, data_addr);
-        if(datap == nullptr){
-            std::cerr << "cannot allocate data buffer" << std::endl;
-            exit(-1);
+
+        if(data_len){
+            void* datap = alloc_dma(data_len, data_addr);
+            if(datap == nullptr){
+                std::cerr << "cannot allocate data buffer" << std::endl;
+                exit(-1);
+            }
+            entry->common.prp1 = data_addr;
         }
 
-        admin_sq_entry[cid].identify.opcode = nvme_admin_identify;
-		admin_sq_entry[cid].identify.command_id = (u16)cid;
-		admin_sq_entry[cid].identify.cns = NVME_ID_CNS_CTRL;
-		admin_sq_entry[cid].identify.prp1 = data_addr;
-		admin_sq_entry[cid].identify.nsid = 0;
-
+        entry->common.command_id = cid;
+        memcpy(&admin_sq_entry[cid], entry, sizeof(nvme_sq_entry_t));
+        
         if (++admin_sq_tail == admin_sq_size) admin_sq_tail = 0;
 		*(volatile u32*)admin_sq_doorbell = admin_sq_tail;
 
     }
 
-
 private:
+    pthread_mutex_t	cq_mutex;
+
     pthread_t intr_th;
     nvme_controller_reg_t* ctrl_reg;
 
@@ -597,13 +639,21 @@ private:
 
 };
 
+void issue_identify_ctrl(std::shared_ptr<NVMeCtrl> ctrl, nvme_sq_entry_t *entry){
+	entry->identify.cns = NVME_ID_CNS_CTRL;
+	entry->identify.nsid = 0;
 
-
-
-
-
+    ctrl->issueCommand(entry, 4096);
+}
 
 int main(){
-    std::shared_ptr<NVMeCtrl> p = std::make_shared<NVMeCtrl>(0);
-    sleep(10);   
+    std::shared_ptr<NVMeCtrl> ctrl = std::make_shared<NVMeCtrl>(0);
+    sleep(1);   
+    nvme_sq_entry_t entry = {0};
+    std::cout << ctrl ->get_jiffies() << std::endl;
+
+    issue_identify_ctrl(ctrl, &entry);
+
+    
+    sleep(5);   
 }
