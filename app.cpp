@@ -656,20 +656,6 @@ private:
     SQ_t sq[32];
     CQ_t cq[32];
 
-    //int admin_cq_size;
-	//int admin_sq_size;
-	//int admin_sq_tail;
-	//int admin_cq_head;
-	//int admin_cq_phase;
-
-    //uint64_t admin_cq_amd_addr;
-    //uint64_t admin_sq_amd_addr;
-	//nvme_sq_entry_t* admin_sq_entry;
-	//nvme_cq_entry_t* admin_cq_entry;
-
-    //void* admin_cq_doorbell;
-	//void* admin_sq_doorbell;
-
 };
 
 void issue_identify_ctrl(std::shared_ptr<NVMeCtrl> ctrl, nvme_sq_entry_t *entry){
