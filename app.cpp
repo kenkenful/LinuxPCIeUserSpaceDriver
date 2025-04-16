@@ -323,9 +323,6 @@ public:
             perror("ioctl in record_stats");
             exit(-1);
         }
-
-
-
     }
 
 private:
