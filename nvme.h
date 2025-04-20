@@ -517,7 +517,18 @@ struct cc_ctx {
 
 typedef union _nvme_controller_config {
 	u32                 val;
-	struct cc_ctx   a;
+	//struct cc_ctx   a;
+	struct {
+		u32             en : 1;
+		u32             rsvd : 3;
+		u32             css : 3;
+		u32             mps : 4;
+		u32             ams : 3;
+		u32             shn : 2;
+		u32             iosqes : 4;
+		u32             iocqes : 4;
+		u32             rsvd2 : 8;
+};
 } nvme_controller_config_t;
 
 typedef union _nvme_controller_status {
@@ -594,8 +605,16 @@ typedef struct _nvme_cq_entry {
 	u16                     cid;
 	union {
 		u16                 psf;
-		struct psf_ctx  a;
-	}u;
+		//struct psf_ctx  a;
+		struct {
+			u16             p : 1;
+			u16             sc : 8;
+			u16             sct : 3;
+			u16             rsvd3 : 2;
+			u16             m : 1;
+			u16             dnr : 1;
+};
+	};
 } nvme_cq_entry_t;
 
 enum {

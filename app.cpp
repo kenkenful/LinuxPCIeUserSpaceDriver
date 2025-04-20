@@ -401,11 +401,11 @@ public:
                 if (evs.data.fd == efd[i]) {
                     if(i == 0){
                         //printf("MSIx vector 0 interrupt ocuured\n");      
-                        if (cq[0].entry[cq[0].head].u.a.p == cq[0].phase) {
-				            while (cq[0].entry[cq[0].head].u.a.p == cq[0].phase) {
+                        if (cq[0].entry[cq[0].head].p == cq[0].phase) {
+				            while (cq[0].entry[cq[0].head].p == cq[0].phase) {
 					            printf("MSIX Interrupt Occured\n");
                                 std::cout << get_ktime() << std::endl;
-
+                                
 					            //int head = p->admin_cq_head;
 					            if (++cq[0].head == cq[0].size) {
 					            	cq[0].head = 0;
@@ -459,10 +459,11 @@ public:
 
             for(int i=0; i<vector_num; ++i){
                 if (evs.data.fd == efd[i]) {
-                    if (cq[0].entry[cq[0].head].u.a.p == cq[0].phase) {
-			            while (cq[0].entry[cq[0].head].u.a.p == cq[0].phase) {
+                    if (cq[0].entry[cq[0].head].p == cq[0].phase) {
+			            while (cq[0].entry[cq[0].head].p == cq[0].phase) {
 			    	        printf("INT-X Interrupt Occured\n");
                             std::cout << get_ktime() << std::endl;
+                            printf("SC: %d, SCT: %d\n", cq[0].entry[cq[0].head].sc, cq[0].entry[cq[0].head].sct);
 
 			    	        if (++cq[0].head == cq[0].size) {
 			    	        	cq[0].head = 0;
@@ -493,8 +494,8 @@ public:
 
     void* polling_handler(void){
         for (;;) {
-            if (cq[0].entry[cq[0].head].u.a.p == cq[0].phase) {
-			    while (cq[0].entry[cq[0].head].u.a.p == cq[0].phase) {
+            if (cq[0].entry[cq[0].head].p == cq[0].phase) {
+			    while (cq[0].entry[cq[0].head].p == cq[0].phase) {
 			        printf("receive response\n");
                     std::cout << get_ktime() << std::endl;
 			        if (++cq[0].head == cq[0].size) {
@@ -525,7 +526,7 @@ public:
 
     bool wait_ready(){
         int cnt = 0;
-        ctrl_reg->cc.a.en = 1;
+        ctrl_reg->cc.en = 1;
 
         while (ctrl_reg->csts.rdy == 0) {
 		    if (cnt++ >  ctrl_reg->cap.a.to) {
@@ -539,7 +540,7 @@ public:
 
     bool wait_not_ready(){
         int cnt = 0;
-        ctrl_reg->cc.a.en = 0;
+        ctrl_reg->cc.en = 0;
         while (ctrl_reg->csts.rdy == 1) {
 		    printf("Waiting  controller disable: %d\n", ctrl_reg->csts.rdy);
 		    if (cnt++ > ctrl_reg->cap.a.to) {
@@ -656,7 +657,8 @@ private:
 };
 
 void issue_identify_ctrl(std::shared_ptr<NVMeCtrl> ctrl, nvme_sq_entry_t *entry){
-	entry->identify.cns = NVME_ID_CNS_CTRL;
+	entry->identify.opcode = nvme_admin_identify;
+    entry->identify.cns = NVME_ID_CNS_CTRL;
 	entry->identify.nsid = 0;
 
     ctrl->issueCommand(entry, 4096);
