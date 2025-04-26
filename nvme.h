@@ -462,7 +462,7 @@ typedef struct nvme_command {
 
 typedef union _nvme_version {
 	u32                 val;
-	struct s {
+	struct {
 		u8              rsvd;
 		u8              mnr;
 		u16             mjr;
@@ -477,7 +477,10 @@ struct attr_ctx {
 
 typedef union _nvme_adminq_attr {
 	u32                 val;
-	struct attr_ctx   a;
+	struct {
+		u16             asqs;
+		u16             acqs;
+	};
 } nvme_adminq_attr_t;
 
 
@@ -499,8 +502,21 @@ struct cap_ctx {
 
 typedef union _nvme_controller_cap {
 	u64                 val;
-	struct cap_ctx a;
+	struct {
+		u16             mqes;
+		u8              cqr : 1;
+		u8              ams : 2;
+		u8              rsvd : 5;
+		u8              to;
 
+		u32             dstrd : 4;
+		u32             nssrs : 1;
+		u32             css : 8;
+		u32             rsvd2 : 3;
+		u32             mpsmin : 4;
+		u32             mpsmax : 4;
+		u32             rsvd3 : 8;
+	};
 } nvme_controller_cap_t;
 
 struct cc_ctx {
@@ -517,7 +533,6 @@ struct cc_ctx {
 
 typedef union _nvme_controller_config {
 	u32                 val;
-	//struct cc_ctx   a;
 	struct {
 		u32             en : 1;
 		u32             rsvd : 3;
@@ -532,13 +547,13 @@ typedef union _nvme_controller_config {
 } nvme_controller_config_t;
 
 typedef union _nvme_controller_status {
-	//u32                 val;
-	//struct s{
-	u32             rdy : 1;
-	u32             cfs : 1;
-	u32             shst : 2;
-	u32             rsvd : 28;
-	//};
+	u32                 val;
+	struct {
+		u32             rdy : 1;
+		u32             cfs : 1;
+		u32             shst : 2;
+		u32             rsvd : 28;
+	};
 } nvme_controller_status_t;
 
 typedef struct _nvme_controller_reg {
@@ -613,7 +628,7 @@ typedef struct _nvme_cq_entry {
 			u16             rsvd3 : 2;
 			u16             m : 1;
 			u16             dnr : 1;
-};
+		};
 	};
 } nvme_cq_entry_t;
 
@@ -766,4 +781,60 @@ struct nvme_smart_log {
 	u32   thm_temp1_total_time;
 	u32   thm_temp2_total_time;
 	u8  rsvd232[280];
+};
+
+enum {
+	NVME_QUEUE_PHYS_CONTIG = (1 << 0),
+	NVME_CQ_IRQ_ENABLED = (1 << 1),
+	NVME_SQ_PRIO_URGENT = (0 << 1),
+	NVME_SQ_PRIO_HIGH = (1 << 1),
+	NVME_SQ_PRIO_MEDIUM = (2 << 1),
+	NVME_SQ_PRIO_LOW = (3 << 1),
+	NVME_FEAT_ARBITRATION = 0x01,
+	NVME_FEAT_POWER_MGMT = 0x02,
+	NVME_FEAT_LBA_RANGE = 0x03,
+	NVME_FEAT_TEMP_THRESH = 0x04,
+	NVME_FEAT_ERR_RECOVERY = 0x05,
+	NVME_FEAT_VOLATILE_WC = 0x06,
+	NVME_FEAT_NUM_QUEUES = 0x07,
+	NVME_FEAT_IRQ_COALESCE = 0x08,
+	NVME_FEAT_IRQ_CONFIG = 0x09,
+	NVME_FEAT_WRITE_ATOMIC = 0x0a,
+	NVME_FEAT_ASYNC_EVENT = 0x0b,
+	NVME_FEAT_AUTO_PST = 0x0c,
+	NVME_FEAT_HOST_MEM_BUF = 0x0d,
+	NVME_FEAT_TIMESTAMP = 0x0e,
+	NVME_FEAT_KATO = 0x0f,
+	NVME_FEAT_HCTM = 0x10,
+	NVME_FEAT_NOPSC = 0x11,
+	NVME_FEAT_RRL = 0x12,
+	NVME_FEAT_PLM_CONFIG = 0x13,
+	NVME_FEAT_PLM_WINDOW = 0x14,
+	NVME_FEAT_HOST_BEHAVIOR = 0x16,
+	NVME_FEAT_SANITIZE = 0x17,
+	NVME_FEAT_SW_PROGRESS = 0x80,
+	NVME_FEAT_HOST_ID = 0x81,
+	NVME_FEAT_RESV_MASK = 0x82,
+	NVME_FEAT_RESV_PERSIST = 0x83,
+	NVME_FEAT_WRITE_PROTECT = 0x84,
+	NVME_FEAT_VENDOR_START = 0xC0,
+	NVME_FEAT_VENDOR_END = 0xFF,
+	NVME_LOG_SUPPORTED = 0x00,
+	NVME_LOG_ERROR = 0x01,
+	NVME_LOG_SMART = 0x02,
+	NVME_LOG_FW_SLOT = 0x03,
+	NVME_LOG_CHANGED_NS = 0x04,
+	NVME_LOG_CMD_EFFECTS = 0x05,
+	NVME_LOG_DEVICE_SELF_TEST = 0x06,
+	NVME_LOG_TELEMETRY_HOST = 0x07,
+	NVME_LOG_TELEMETRY_CTRL = 0x08,
+	NVME_LOG_ENDURANCE_GROUP = 0x09,
+	NVME_LOG_ANA = 0x0c,
+	NVME_LOG_FEATURES = 0x12,
+	NVME_LOG_RMI = 0x16,
+	NVME_LOG_DISC = 0x70,
+	NVME_LOG_RESERVATION = 0x80,
+	NVME_FWACT_REPL = (0 << 3),
+	NVME_FWACT_REPL_ACTV = (1 << 3),
+	NVME_FWACT_ACTV = (2 << 3),
 };

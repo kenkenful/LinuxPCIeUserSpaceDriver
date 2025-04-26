@@ -34,7 +34,7 @@ public:
         get_pci_config_addr();
         get_bar0();
         map_ctrlreg();
-        
+      
         printf("pci_addr: %lx\n", pci_addr);
         printf("bar0: %lx\n", bar0);
     }
@@ -71,7 +71,6 @@ public:
         }
 
 	    printf("%x:%x.%x\n", param.b.bus, param.b.dev, param.b.func);
-
         busn = param.b.bus; 
         devn = param.b.dev;
         funcn = param.b.func;
@@ -356,17 +355,17 @@ public:
     NVMeCtrl(int instance_no):GenPci(instance_no){
         ctrl_reg = (nvme_controller_reg_t*)bar0_virt;
         init_ctrl();
-        
-        //set_MSIX(1);
-        //kick_msix_intr_thread();
+      
+        set_MSIX(1);
+        kick_msix_intr_thread();
 
-        set_INTx(1);
-        kick_intx_intr_thread();
+        //set_INTx(1);
+        //kick_intx_intr_thread();
 
         //kick_polling_thread();
 
-        allocate_stats_buffer();
-        create_dummy_blk(0);
+        //allocate_stats_buffer();
+        //create_dummy_blk(0);
         setup_ktime();
         //create_dummy_blk(5);
         
@@ -405,14 +404,13 @@ public:
 				            while (cq[0].entry[cq[0].head].p == cq[0].phase) {
 					            printf("MSIX Interrupt Occured\n");
                                 std::cout << get_ktime() << std::endl;
+                                printf("CID: %d, SC: %d, SCT: %d\n", cq[0].entry[cq[0].head].cid , cq[0].entry[cq[0].head].sc, cq[0].entry[cq[0].head].sct);
                                 
-					            //int head = p->admin_cq_head;
 					            if (++cq[0].head == cq[0].size) {
 					            	cq[0].head = 0;
 					            	cq[0].phase = !cq[0].phase;
 					            }
 					            *(volatile u32*)(cq[0].doorbell) = cq[0].head;
-					            //ctrl_reg->sq0tdbl[1] = admin_cq_head;
 					        }
 		            	}
 
@@ -463,7 +461,7 @@ public:
 			            while (cq[0].entry[cq[0].head].p == cq[0].phase) {
 			    	        printf("INT-X Interrupt Occured\n");
                             std::cout << get_ktime() << std::endl;
-                            printf("SC: %d, SCT: %d\n", cq[0].entry[cq[0].head].sc, cq[0].entry[cq[0].head].sct);
+                            printf("CID: %d, SC: %d, SCT: %d\n", cq[0].entry[cq[0].head].cid , cq[0].entry[cq[0].head].sc, cq[0].entry[cq[0].head].sct);
 
 			    	        if (++cq[0].head == cq[0].size) {
 			    	        	cq[0].head = 0;
@@ -529,7 +527,7 @@ public:
         ctrl_reg->cc.en = 1;
 
         while (ctrl_reg->csts.rdy == 0) {
-		    if (cnt++ >  ctrl_reg->cap.a.to) {
+		    if (cnt++ >  ctrl_reg->cap.to) {
 		    	std::cerr << "timeout: controller enable" << std::endl;
 		    	return false;
 		    }
@@ -543,7 +541,7 @@ public:
         ctrl_reg->cc.en = 0;
         while (ctrl_reg->csts.rdy == 1) {
 		    printf("Waiting  controller disable: %d\n", ctrl_reg->csts.rdy);
-		    if (cnt++ > ctrl_reg->cap.a.to) {
+		    if (cnt++ > ctrl_reg->cap.to) {
 		    	std::cerr << "timeout: controller disable" << std::endl;
 		    	return false;
 		    }
@@ -563,8 +561,10 @@ public:
 	    cq[0].size = cq_depth;
 	    sq[0].size = sq_depth;
         
-        ctrl_reg->aqa.a.acqs = cq[0].size -1;
-        ctrl_reg->aqa.a.asqs = sq[0].size -1;
+        aqa.acqs = cq[0].size -1;
+        aqa.asqs = sq[0].size -1;
+
+        ctrl_reg -> aqa.val = aqa.val;
 
         cq[0].entry = (nvme_cq_entry_t*)alloc_dma(sizeof(nvme_cq_entry_t) * cq[0].size, cq[0].dma_addr);
         if(cq[0].entry == nullptr){
@@ -582,21 +582,24 @@ public:
 	    ctrl_reg->asq = sq[0].dma_addr;
 
         sq[0].doorbell = &ctrl_reg->sq0tdbl[0];
-	    cq[0].doorbell = &ctrl_reg->sq0tdbl[0] + (1 << ctrl_reg->cap.a.dstrd);
+	    cq[0].doorbell = &ctrl_reg->sq0tdbl[0] + (1 << ctrl_reg->cap.dstrd);
 
     }
 
     bool init_ctrl(){
+        nvme_controller_config_t cc = {0};
         bool ret = true;
 
         ret = wait_not_ready();
 
         init_adminQ(64,64);
 
-        ctrl_reg ->cc.val = NVME_CC_CSS_NVM;
-	    ctrl_reg ->cc.val |= 0 << NVME_CC_MPS_SHIFT;
-	    ctrl_reg ->cc.val |= NVME_CC_AMS_RR | NVME_CC_SHN_NONE;
-	    ctrl_reg ->cc.val |= NVME_CC_IOSQES | NVME_CC_IOCQES;
+        cc.val = NVME_CC_CSS_NVM;
+	    cc.val |= 0 << NVME_CC_MPS_SHIFT;
+	    cc.val |= NVME_CC_AMS_RR | NVME_CC_SHN_NONE;
+	    cc.val |= NVME_CC_IOSQES | NVME_CC_IOCQES;
+
+        ctrl_reg ->cc.val = cc.val;
 
         ret = wait_ready();
         if(ret == true){
@@ -607,8 +610,8 @@ public:
     }
 
 
-    void issueCommand(nvme_sq_entry_t *entry, int data_len){
-        int cid = sq[0].tail;
+    void issueCommand(nvme_sq_entry_t &entry, int entry_no, int data_len){
+        int cid = sq[entry_no].tail;
         uint64_t data_addr;
 
         if(data_len){
@@ -617,14 +620,14 @@ public:
                 std::cerr << "cannot allocate data buffer" << std::endl;
                 exit(-1);
             }
-            entry->common.prp1 = data_addr;
+            entry.common.prp1 = data_addr;
         }
 
-        entry->common.command_id = cid;
-        memcpy(&sq[0].entry[cid], entry, sizeof(nvme_sq_entry_t));
+        entry.common.command_id = cid;
+        memcpy(&sq[entry_no].entry[cid], &entry, sizeof(nvme_sq_entry_t));
         
-        if (++sq[0].tail == sq[0].size) sq[0].tail = 0;
-		*(volatile u32*)sq[0].doorbell = sq[0].tail;
+        if (++sq[entry_no].tail == sq[entry_no].size) sq[entry_no].tail = 0;
+		*(volatile u32*)sq[entry_no].doorbell = sq[entry_no].tail;
 
     }
 
@@ -656,22 +659,83 @@ private:
 
 };
 
-void issue_identify_ctrl(std::shared_ptr<NVMeCtrl> ctrl, nvme_sq_entry_t *entry){
-	entry->identify.opcode = nvme_admin_identify;
-    entry->identify.cns = NVME_ID_CNS_CTRL;
-	entry->identify.nsid = 0;
+void identify_ctrl(std::shared_ptr<NVMeCtrl> ctrl){
+    std::cout << __func__ << std::endl;
+    std::cout << ctrl ->get_ktime() << std::endl;
+    nvme_sq_entry_t entry = {0};
+	entry.identify.opcode = nvme_admin_identify;
+    entry.identify.cns = NVME_ID_CNS_CTRL;
+	entry.identify.nsid = 0;
 
-    ctrl->issueCommand(entry, 4096);
+    ctrl->issueCommand(entry, 0, 4096);
+}
+
+void create_cq(std::shared_ptr<NVMeCtrl> ctrl, int cqid, int qsize, int flags, int vector){
+    std::cout << __func__ << std::endl;
+    std::cout << ctrl ->get_ktime() << std::endl;
+    nvme_sq_entry_t entry = {0};
+
+    entry.create_cq.opcode = nvme_admin_create_cq;
+    entry.create_cq.cqid = cqid;
+    entry.create_cq.qsize = qsize -1;
+    entry.create_cq.cq_flags = flags;
+    entry.create_cq.irq_vector = vector;
+    ctrl->issueCommand(entry, 0, sizeof(nvme_cq_entry_t) * qsize);
+
+}
+
+void create_sq(std::shared_ptr<NVMeCtrl> ctrl, int sqid, int qsize, int flags , int related_cqid){
+    std::cout << __func__ << std::endl;
+    std::cout << ctrl ->get_ktime() << std::endl;
+    nvme_sq_entry_t entry = {0};
+
+    entry.create_sq.opcode = nvme_admin_create_sq;
+    entry.create_sq.sqid = sqid;
+    entry.create_sq.qsize = qsize -1;
+    entry.create_sq.sq_flags = flags;
+    entry.create_sq.cqid = related_cqid;
+    ctrl->issueCommand(entry, 0, sizeof(nvme_sq_entry_t) * qsize);
+
+}
+
+void delete_cq(std::shared_ptr<NVMeCtrl> ctrl, int cqid){
+    std::cout << __func__ << std::endl;
+    std::cout << ctrl ->get_ktime() << std::endl;
+    nvme_sq_entry_t entry = {0};
+    entry.delete_queue.opcode = nvme_admin_delete_cq;
+    
+    entry.delete_queue. qid = cqid;
+    ctrl->issueCommand(entry, 0, 0);
+
+}
+
+void delete_sq(std::shared_ptr<NVMeCtrl> ctrl, int sqid){
+    std::cout << __func__ << std::endl;
+    std::cout << ctrl ->get_ktime() << std::endl;
+    nvme_sq_entry_t entry = {0};
+    entry.delete_queue.opcode = nvme_admin_delete_sq;
+    
+    entry.delete_queue. qid = sqid;
+    ctrl->issueCommand(entry, 0, 0);
 }
 
 int main(){
     std::shared_ptr<NVMeCtrl> ctrl = std::make_shared<NVMeCtrl>(0);
     sleep(1);   
-    nvme_sq_entry_t entry = {0};
-    std::cout << ctrl ->get_ktime() << std::endl;
 
-    issue_identify_ctrl(ctrl, &entry);
+    identify_ctrl(ctrl);
+    sleep(1);   
+    create_cq(ctrl, 3, 32, NVME_QUEUE_PHYS_CONTIG | NVME_CQ_IRQ_ENABLED, 3);
+    sleep(1);   
 
-     ctrl ->record_stats(0, iotype::Read, 4096 , ctrl ->get_ktime() );
-    sleep(5);   
+    create_sq(ctrl, 3, 32, NVME_QUEUE_PHYS_CONTIG | NVME_SQ_PRIO_MEDIUM, 3);
+    sleep(1);   
+
+    delete_sq(ctrl, 3);
+    sleep(1);   
+
+    delete_cq(ctrl, 3);
+
+    //ctrl ->record_stats(0, iotype::Read, 4096 , ctrl ->get_ktime() );
+    sleep(2);   
 }
